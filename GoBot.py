@@ -357,8 +357,10 @@ bot = LBClient()
 
 
 class LeaderboardView(discord.ui.View):
-    def __init__(self, all_rows: List[dict], page_size: int, song_title: str, artist: str, instrument: str, year: Optional[int] = None, genre: Optional[str] = None):
+    def __init__(self, all_rows: List[dict], page_size: int, song_title: str, artist: str, instrument: str,
+                 year: Optional[int] = None, genre: Optional[str] = None, user: Optional[discord.User] = None):
         super().__init__(timeout=120)
+        self.authorized_user = user
         self.all_rows = all_rows
         self.page_size = page_size
         self.page = 0
@@ -414,6 +416,12 @@ class PrevButton(discord.ui.Button):
         super().__init__(label="Prev", style=discord.ButtonStyle.secondary, disabled=disabled)
     async def callback(self, interaction: discord.Interaction):
         view: LeaderboardView = self.view  # type: ignore
+        if interaction.user != view.authorized_user:
+            await interaction.response.send_message(
+                "This leaderboard view isn't yours — use `/leaderboards` to start your own session.",
+                ephemeral=True
+            )
+            return
         if view.page > 0:
             view.page -= 1
         await view.update_message(interaction)
@@ -423,6 +431,12 @@ class NextButton(discord.ui.Button):
         super().__init__(label="Next", style=discord.ButtonStyle.secondary, disabled=disabled)
     async def callback(self, interaction: discord.Interaction):
         view: LeaderboardView = self.view  # type: ignore
+        if interaction.user != view.authorized_user:
+            await interaction.response.send_message(
+                "This leaderboard view isn't yours — use `/leaderboards` to start your own session.",
+                ephemeral=True
+            )
+            return
         total_pages = max(1, (len(view.all_rows) + view.page_size - 1) // view.page_size)
         if view.page < total_pages - 1:
             view.page += 1
@@ -433,6 +447,12 @@ class FindPlayerButton(discord.ui.Button):
         super().__init__(label="Find Player", style=discord.ButtonStyle.primary)
     async def callback(self, interaction: discord.Interaction):
         view: LeaderboardView = self.view  # type: ignore
+        if interaction.user != view.authorized_user:
+            await interaction.response.send_message(
+                "This leaderboard view isn't yours — use `/leaderboards` to start your own session.",
+                ephemeral=True
+            )
+            return
         await interaction.response.send_modal(FindPlayerModal(view))
 
 class FindPlayerModal(discord.ui.Modal, title="Find a player"):
@@ -485,7 +505,8 @@ class SongSelect(discord.ui.Select):
             artist=s.artist,
             instrument=INSTR_DISPLAY_NAMES.get(resolved, resolved.capitalize()),
             year=s.year,
-            genre=s.genre
+            genre=s.genre,
+            user=interaction.user
         )
 
         start_index = view.page * view.page_size
@@ -560,7 +581,8 @@ async def leaderboards_cmd(interaction: discord.Interaction, song: str, instrume
         artist=s.artist,
         instrument=INSTR_DISPLAY_NAMES.get(resolved, resolved.capitalize()),
         year=s.year,
-        genre=s.genre
+        genre=s.genre,
+        user=interaction.user
     )
 
     start_index = view.page * view.page_size
