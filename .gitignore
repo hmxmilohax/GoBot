@@ -1,3 +1,7 @@
 config.ini
 .DS_Store
 /generator
+/battle_ui
+battle_manager_state.json
+*.png_ps3
+*.png_xbox
