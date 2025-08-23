@@ -86,6 +86,7 @@ INSTR_ROLE_IDS: Dict[str, int] = {
     "band": 10,
 }
 
+INSTR_BY_ROLE_ID: Dict[int, str] = {v: k for k, v in INSTR_ROLE_IDS.items()}
 INSTR_SET_WEEK = ["guitar", "bass", "drums", "vocals", "band"]
 PRO_ONE_PER_WEEK = ["proguitar", "probass", "prokeys"]
 
@@ -1381,11 +1382,50 @@ class SubscriptionManager:
         header_line = f"New leader: {self._fmt_new_leader_line(new_top)}"
         embed = discord.Embed(title=title, description=f"{header_line}\n\n{desc}", color=0xF97316)
 
+        # Thumbnail (fast path, verified in background)
         thumb = await self._thumb_for_battle(battle)
         if thumb:
             embed.set_thumbnail(url=thumb)
 
-        # NEW: resolve Discord time tags safely (accept ISO or epoch-like)
+        # --- NEW: Song + instrument details (like other embeds) ---
+        sid = self._extract_song_id(battle)
+        song = self.bot.song_index.by_id.get(sid) if (sid and self.bot.song_index) else None  # type: ignore
+
+        # instrument on battle is role_id (int); map back to our key
+        role_val = battle.get("instrument")
+        role_id = int(role_val) if isinstance(role_val, (int, float)) else (int(role_val) if isinstance(role_val, str) and role_val.isdigit() else None)
+        instr_key = INSTR_BY_ROLE_ID.get(role_id) if role_id is not None else None
+        instr_name = INSTR_DISPLAY_NAMES.get(instr_key, (instr_key or "Instrument").capitalize())
+
+        # difficulty from the song's ranks for this instrument
+        rank_val = (song.ranks or {}).get(instr_key) if (song and instr_key) else None
+        diff_txt = difficulty_label(instr_key, rank_val) if instr_key else "—"
+
+        if song:
+            artist = song.artist or "—"
+            album_line = song.album_name or "—"
+            if song.year:
+                album_line = f"{album_line} ({song.year})"
+            details = f"{(song.genre or '—')} • {(song.source or '—')} • ID `{song.song_id}`"
+
+            # Row 1: Artist | Album | pad
+            embed.add_field(name="Artist", value=artist, inline=True)
+            embed.add_field(name="Album", value=album_line, inline=True)
+            embed.add_field(name="\u200B", value="\u200B", inline=True)  # pad
+
+            # Row 2: Difficulty | Instrument | pad
+            embed.add_field(name="Difficulty", value=diff_txt, inline=True)
+            embed.add_field(name="Instrument", value=instr_name, inline=True)
+            embed.add_field(name="\u200B", value="\u200B", inline=True)  # pad
+
+            # Row 3: Details
+            embed.add_field(name="Details", value=details, inline=False)
+        else:
+            # Fallback if we couldn't resolve the song
+            fallback = f"Song ID: `{sid or 'Unknown'}`"
+            embed.add_field(name="Details", value=fallback, inline=False)
+
+        # --- Time tags (kept from your original) ---
         def _to_unix(v):
             if isinstance(v, (int, float)):
                 return int(v)
@@ -1399,7 +1439,6 @@ class SubscriptionManager:
 
         starts_ts = _to_unix(battle.get("starts_at"))
         ends_ts   = _to_unix(battle.get("expires_at"))
-
         embed.add_field(name="Started", value=(f"<t:{starts_ts}:R>" if starts_ts else "—"), inline=True)
         embed.add_field(name="Ends",    value=(f"<t:{ends_ts}:R>"   if ends_ts   else "—"), inline=True)
 
@@ -1423,6 +1462,7 @@ class SubscriptionManager:
                 )
             except Exception:
                 pass
+
 
     async def _loop(self):
         await self.bot.wait_until_ready()
