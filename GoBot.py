@@ -2323,7 +2323,8 @@ async def leaderboards_cmd(interaction: discord.Interaction, song: str, instrume
             await interaction.followup.send("I couldn't post in the channel or DM you. Please check my permissions.")
 
 @bot.tree.command(name="battles", description="View active battles and top players.")
-async def battles_cmd(interaction: discord.Interaction):
+@app_commands.describe(song="(optional) Song name, shortname, or numeric ID to jump to")
+async def battles_cmd(interaction: discord.Interaction, song: Optional[str] = None):
     await interaction.response.defer()
 
     if not bot.http_session:
@@ -2336,6 +2337,75 @@ async def battles_cmd(interaction: discord.Interaction):
         return
 
     view = BattleListView(battles, interaction.user, show_subscribe=True)
+
+    # ---------- auto-jump ----------
+    def _norm(s: str) -> str:
+        try:
+            return SongIndex._norm(s)
+        except Exception:
+            return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+    def _extract_song_id(b: dict) -> Optional[int]:
+        # copy of BattleListView._extract_song_id so we can use it before building the view
+        sid = None
+        if isinstance(b.get("song_ids"), list) and b["song_ids"]:
+            sid = b["song_ids"][0]
+        elif isinstance(b.get("song_id"), (int, str)):
+            sid = b["song_id"]
+        elif isinstance(b.get("description"), str):
+            m = re.search(r"\bID\s*(\d{4,9})\b", b["description"])
+            if m:
+                sid = m.group(1)
+        try:
+            return int(sid) if sid is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    if song:
+        q = song.strip()
+        qn = _norm(q)
+        candidate_ids: set[int] = set()
+
+        # numeric?
+        if q.isdigit():
+            try:
+                candidate_ids.add(int(q))
+            except ValueError:
+                pass
+
+        # lookup via SongIndex
+        if bot.song_index:
+            for s in bot.song_index.find_all(q, max_results=8):
+                candidate_ids.add(int(s.song_id))
+
+        # 1) exact ID hit → first match wins
+        jump_idx = None
+        for i, b in enumerate(battles):
+            sid = _extract_song_id(b)
+            if sid is not None and sid in candidate_ids:
+                jump_idx = i
+                break
+
+        # 2) title contains query
+        if jump_idx is None and bot.song_index:
+            for i, b in enumerate(battles):
+                sid = _extract_song_id(b)
+                song_obj = bot.song_index.by_id.get(sid) if sid else None
+                if song_obj and qn and qn in _norm(song_obj.name):
+                    jump_idx = i
+                    break
+
+        # 3) description contains query (e.g., "Drive — Incubus (ID 1010546)")
+        if jump_idx is None:
+            for i, b in enumerate(battles):
+                if qn and qn in _norm(str(b.get("description", ""))):
+                    jump_idx = i
+                    break
+
+        if jump_idx is not None:
+            view.page = jump_idx
+    # ---------- end auto-jump ----------
+
     embed = await view.build_embed()
     view.message = await interaction.followup.send(embed=embed, view=view)
 
