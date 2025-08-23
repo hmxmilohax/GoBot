@@ -1697,7 +1697,8 @@ class BattleListView(discord.ui.View):
             async with sem:
                 if bid not in self.leaderboards:
                     rows = await fetch_battle_leaderboard(bot.http_session, bid, page_size=TOP_N)
-                    self.leaderboards[bid] = rows or []
+                    if rows:
+                        self.leaderboards[bid] = rows
             # also warm the thumbnail cache (non-blocking verification)
             try:
                 _ = await self._thumb_for_battle(battle)
@@ -1778,9 +1779,10 @@ class BattleListView(discord.ui.View):
         bid = battle.get("battle_id")
 
         lb = self.leaderboards.get(bid)
-        if lb is None:
-            lb = await fetch_battle_leaderboard(bot.http_session, bid)  # type: ignore
-            self.leaderboards[bid] = lb or []
+        if not lb:  # None or []
+            lb = await fetch_battle_leaderboard(bot.http_session, bid, page_size=TOP_N)  # type: ignore
+            if lb:  # only cache when we actually have rows
+                self.leaderboards[bid] = lb
 
         # Resolve song (and thumbnail)
         sid = self._extract_song_id(battle)
