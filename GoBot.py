@@ -32,6 +32,7 @@ AUTO_BATTLE_PERIOD_DAYS = 7
 SUBSCRIPTIONS_LOOP_SECONDS = 60
 SUBS_KEY = "battle_subscriptions"   # { "<battle_id>": [user_id, ...] }
 TOPS_KEY = "battle_top_seen"        # { "<battle_id>": {"name": "...", "score": 123} }
+OVERTAKES_KEY = "battle_overtakes"  # NEW: { "<battle_id>": int }
 
 BASE_URL = "https://gocentral-service.rbenhanced.rocks"
 
@@ -720,6 +721,7 @@ def _read_manager_state() -> dict:
     st.setdefault("week", 0)
     st.setdefault(SUBS_KEY, {})  # {battle_id: [user_ids]}
     st.setdefault(TOPS_KEY, {})  # {battle_id: {"name": "...", "score": 123}}
+    st.setdefault(OVERTAKES_KEY, {})  # {battle_id: int}
     return st
 
 
@@ -842,6 +844,8 @@ class WeeklyBattleManager:
         num_champs = sum(1 for _, w in winners if w)
         lead = "No champions crowned" if num_champs == 0 else f"{num_champs} champions{'s' if num_champs != 1 else ''} crowned"
 
+        over_map: Dict[str, int] = self.state.get(OVERTAKES_KEY, {}) or {}
+
         lines: list[str] = [f"{lead} Congratulations! Use `/battles` to view full tables.", SPACER]
 
         for rec, w in winners:
@@ -855,6 +859,9 @@ class WeeklyBattleManager:
 
             if w:
                 winner_line = f"🏆 **{w['_name']}** — **{w['_score_str']}**"
+                if changes:
+                    plural = "" if changes == 1 else "s"
+                    winner_line += f" • **{changes}** overtake{plural}"
             else:
                 winner_line = "🚫 *No entries*"
 
@@ -897,6 +904,9 @@ class WeeklyBattleManager:
                     by_id[rid]["winner"] = _winner_payload(w)
                     by_id[rid]["winner_announced"] = True
                     by_id[rid]["announced_at"] = _to_iso(_utcnow())
+                    by_id[rid]["overtakes"] = int(over_map.get(bkey, 0) or 0)
+                over_map.pop(bkey, None)
+            self.state[OVERTAKES_KEY] = over_map
             _write_manager_state(self.state)
 
     def _eligible_songs(self) -> list[Song]:
@@ -1271,6 +1281,7 @@ class WeeklyBattleManager:
                 "week": week_num,
                 "winner_announced": False,
                 "winner": None,
+                "overtakes": 0,
             }
 
 class SubscriptionManager:
@@ -1281,6 +1292,11 @@ class SubscriptionManager:
         self.task = asyncio.create_task(self._loop())
 
     # --- State helpers ---
+    def _overtakes(self) -> Dict[str, int]:
+        if not self.bot.manager:
+            return {}
+        return self.bot.manager.state.setdefault(OVERTAKES_KEY, {})
+
     def _subs(self) -> Dict[str, List[int]]:
         # subscriptions live in the same state file under SUBS_KEY
         if not self.bot.manager:
@@ -1376,11 +1392,19 @@ class SubscriptionManager:
         user_ids: List[int],
         *,
         broadcast_channel_id: Optional[int] = None,
+        overtake_count: Optional[int] = None,
     ):
         desc = format_battle_rows(rows or [], max_n=TOP_N)
         title = f"🥇 Overtake Alert — {battle.get('title','(untitled)')}"
         header_line = f"New leader: {self._fmt_new_leader_line(new_top)}"
-        embed = discord.Embed(title=title, description=f"{header_line}\n\n{desc}", color=0xF97316)
+        changes_line = f"Overtakes so far: **{overtake_count}**" if isinstance(overtake_count, int) else None
+        head = "\n".join([l for l in (header_line, changes_line) if l])
+
+        embed = discord.Embed(
+            title=title,
+            description=f"{head}\n\n{desc}",
+            color=0xF97316
+        )
 
         # Thumbnail (fast path, verified in background)
         thumb = await self._thumb_for_battle(battle)
@@ -1524,6 +1548,10 @@ class SubscriptionManager:
                     self._set_baseline(bkey, top_row)
 
                     if changed:
+                        count = self._overtakes().get(bkey, 0) + 1
+                        self._overtakes()[bkey] = count
+                        await self._save()
+
                         lb_rows = await fetch_battle_leaderboard(self.bot.http_session, bid, page_size=TOP_N) or []
                         user_ids = subs.get(bkey, [])
                         await self._send_alert(
@@ -1532,6 +1560,7 @@ class SubscriptionManager:
                             top_row,
                             user_ids,
                             broadcast_channel_id=getattr(self.bot, "overtakes_channel_id", None) if watch_all else None,
+                            overtake_count=count,
                         )
 
                 await asyncio.sleep(SUBSCRIPTIONS_LOOP_SECONDS)
@@ -2489,6 +2518,7 @@ async def continue_battle_create(interaction: discord.Interaction, song_obj: Son
                             "week": bot.manager.state.get("week") or 0,
                             "winner_announced": False,
                             "winner": None,
+                            "overtakes": 0,
                         }
                         async with bot.manager.lock:
                             bot.manager.state["created_battles"].append(rec)
