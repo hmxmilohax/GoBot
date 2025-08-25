@@ -840,60 +840,96 @@ class WeeklyBattleManager:
                 _write_manager_state(self.state)
             return
 
-        # Resolve channel
         channel = self.bot.get_channel(chan_id) or await self.bot.fetch_channel(chan_id)
 
-        # Fetch winners (one API hit per finished battle)
         winners: list[tuple[dict, Optional[dict]]] = []
-        for rec in finished_recs:
-            w = await fetch_battle_top_winner(self.bot.http_session, rec["battle_id"])
-            winners.append((rec, w))
+        band_groups: dict[int, dict] = {}  # battle_id -> {'score': int, 'names': [...], '_score_str': str}
 
-        # Compose one embed
-        title = "Score Snipe — Results"
-        # Compose one embed
+        for rec in finished_recs:
+            bid = int(rec["battle_id"])
+            instr = rec.get("instrument")
+            # recs we created store string keys; service payloads may store role_id
+            if isinstance(instr, int):
+                instr_key = INSTR_BY_ROLE_ID.get(instr)
+            elif isinstance(instr, str):
+                instr_key = instr
+            else:
+                instr_key = None
+
+            if instr_key == "band":
+                rows = await fetch_battle_leaderboard(self.bot.http_session, bid, page_size=TOP_N) or []
+                if rows:
+                    top_score = rows[0].get("score")
+                    grp = [r for r in rows if r.get("score") == top_score]
+                    names = [str(r.get("name","Unknown")) for r in grp]
+                    try:
+                        sc_str = f"{int(top_score):,}"
+                    except Exception:
+                        sc_str = "?"
+                    band_groups[bid] = {"score": int(top_score) if isinstance(top_score,(int,float)) else None,
+                                        "names": names, "_score_str": sc_str}
+                    # keep a single top row for generic fields if you want
+                    top = dict(rows[0])
+                    top["_score_str"] = sc_str
+                    top["_name"] = names[0] if names else "Unknown"
+                    winners.append((rec, top))
+                else:
+                    winners.append((rec, None))
+            else:
+                top = await fetch_battle_top_winner(self.bot.http_session, bid)
+                winners.append((rec, top))
+
+        # Title + header
         weeks = {rec.get("week") for rec, _ in winners if rec.get("week")}
         title = f"Score Snipe Week {list(weeks)[0]} — Winners Circle" if len(weeks) == 1 else "Score Snipe — Winners Circle"
-
         SPACER = "\u200B"
-
-        # how many categories had an actual winner
         num_champs = sum(1 for _, w in winners if w)
-        lead = "No champions crowned" if num_champs == 0 else f"{num_champs} champions{'s' if num_champs != 1 else ''} crowned"
+        lead = "No champions crowned" if num_champs == 0 else f"{num_champs} champion{'s' if num_champs != 1 else ''} crowned"
 
         over_map: Dict[str, int] = self.state.get(OVERTAKES_KEY, {}) or {}
-
         lines: list[str] = [f"{lead} Congratulations! Use `/battles` to view full tables.", SPACER]
 
         for rec, w in winners:
             song = self._song_from_id(int(rec["song_id"]))
             instr_key = rec.get("instrument")
+            if isinstance(instr_key, int):
+                instr_key = INSTR_BY_ROLE_ID.get(instr_key)
             instr_name = INSTR_DISPLAY_NAMES.get(instr_key, (instr_key or "").capitalize())
             emoji = INSTR_EMOJI.get(instr_key, "🎵")
 
             song_part = song.name if song else f"ID {rec.get('song_id')}"
             artist_part = f" by _{song.artist}_" if song and song.artist else ""
 
-            over_map = self.state.get(OVERTAKES_KEY, {}) or {}
+            bkey = str(rec["battle_id"])
+            changes = int(over_map.get(bkey, 0) or 0)
 
-            for rec, w in winners:
-                bkey = str(rec["battle_id"])
-                changes = int(over_map.get(bkey, 0) or 0)
-
-                # ... build winner_line ...
-                winner_line = f"🏆 **{w['_name']}** — **{w['_score_str']}**" if w else "🚫 *No entries*"
-                if w and changes:
-                    plural = "" if changes == 1 else "s"
-                    winner_line += f" • **{changes}** overtake{plural}"
-
+            # Winner line: band shows score group; others show player
+            if instr_key == "band":
+                info = band_groups.get(int(rec["battle_id"])) if w else None
+                if info and info.get("score") is not None:
+                    names = info["names"]
+                    sc_str = info["_score_str"]
+                    if len(names) == 1:
+                        winner_line = f"🏆 **{names[0]}** — **{sc_str}**"
+                    elif len(names) <= 4:
+                        names_str = "; ".join(f"**{n}**" for n in names)
+                        winner_line = f"🏆 **{sc_str}** — {names_str}"
+                    else:
+                        winner_line = f"🏆 **{sc_str}** — ×{len(names)}"
+                else:
+                    winner_line = "🚫 *No entries*"
             else:
-                winner_line = "🚫 *No entries*"
+                winner_line = f"🏆 **{w['_name']}** — **{w['_score_str']}**" if w else "🚫 *No entries*"
+
+            if w and changes:
+                plural = "" if changes == 1 else "s"
+                winner_line += f" • **{changes}** overtake{plural}"
 
             lines.append(f"{emoji} **{instr_name}** — *{song_part}*{artist_part}")
             lines.append(" " + winner_line)
             lines.append(SPACER)
 
-        # Add the time tag **inside the description**, not footer
+        # Next week's time hint (unchanged)
         nxt = _from_iso(self.state.get("next_run_at"))
         if nxt and nxt > _utcnow():
             ts = int(nxt.timestamp())
@@ -902,9 +938,8 @@ class WeeklyBattleManager:
         embed = discord.Embed(
             title=title,
             description="\n".join(lines),
-            color=0xFACC15,  # gold
+            color=0xFACC15,
         )
-
 
         try:
             await channel.send(
@@ -918,7 +953,7 @@ class WeeklyBattleManager:
                 _write_manager_state(self.state)
             return
 
-        # Mark announced
+        # Persist winners + freeze/clear overtake counts
         async with self.lock:
             by_id = {r["battle_id"]: r for r in self.state.get("created_battles", [])}
             for rec, w in winners:
@@ -1389,25 +1424,75 @@ class SubscriptionManager:
         name = str(top_row.get("name", "Unknown"))
         return f"**{name}** — **{score_str}**"
 
-    def _baseline_or_changed(self, bkey: str, top_row: Optional[dict]) -> Optional[bool]:
-        """Returns None if we should set baseline (no alert), True if changed, False if unchanged."""
+    def _battle_instr_key(self, battle: Optional[dict]) -> Optional[str]:
+        if not battle:
+            return None
+        v = battle.get("instrument")
+        if isinstance(v, int):
+            return INSTR_BY_ROLE_ID.get(v)
+        if isinstance(v, str):
+            if v.isdigit():
+                return INSTR_BY_ROLE_ID.get(int(v))
+            return v  # we store string keys in created_battles
+        return None
+
+    def _leader_key_for(self, battle: Optional[dict], top_row: Optional[dict]) -> Optional[str]:
+        """Return a normalized leader key for baseline/changed checks."""
+        if not top_row:
+            return None
+        instr = self._battle_instr_key(battle)
+        if instr == "band":
+            sc = top_row.get("score")
+            try:
+                return f"SCORE::{int(sc)}"
+            except (TypeError, ValueError):
+                return None
+        # non-band: compare by name like before
+        return f"NAME::{str(top_row.get('name', 'Unknown')).strip()}"
+
+    def _baseline_or_changed(self, bkey: str, top_row: Optional[dict], battle: Optional[dict] = None) -> Optional[bool]:
+        """None -> set baseline; True -> changed; False -> unchanged."""
         if not top_row:
             return None
         tops = self._tops()
         cur = tops.get(bkey)
-        new_name = str(top_row.get("name", "Unknown"))
-        if not cur:
-            return None  # baseline first observation
-        # Only alert if player *name* changes (per requirements)
-        return new_name != cur.get("name")
 
-    def _set_baseline(self, bkey: str, top_row: Optional[dict]):
+        new_key = self._leader_key_for(battle, top_row)
+        if not new_key:
+            return None
+
+        if not cur:
+            return None  # first observation -> seed baseline
+
+        # Back-compat with older records (had no 'leader_key')
+        old_key = cur.get("leader_key")
+        if not old_key:
+            instr = self._battle_instr_key(battle)
+            if instr == "band":
+                # fall back to score if present, else name
+                if "score" in cur and isinstance(cur["score"], int):
+                    old_key = f"SCORE::{cur['score']}"
+                else:
+                    old_key = f"NAME::{cur.get('name','Unknown')}"
+            else:
+                old_key = f"NAME::{cur.get('name','Unknown')}"
+
+        return new_key != old_key
+
+    def _set_baseline(self, bkey: str, top_row: Optional[dict], battle: Optional[dict] = None):
         if not top_row:
             return
-        self._tops()[bkey] = {
+        sc = top_row.get("score")
+        try:
+            sc_int = int(sc) if isinstance(sc, (int, float, str)) and str(sc).isdigit() else None
+        except Exception:
+            sc_int = None
+        record = {
+            "leader_key": self._leader_key_for(battle, top_row),
             "name": str(top_row.get("name", "Unknown")),
-            "score": int(top_row.get("score")) if isinstance(top_row.get("score"), (int, float)) else None,
+            "score": sc_int,
         }
+        self._tops()[bkey] = record
 
     async def _send_alert(
         self,
@@ -1445,6 +1530,20 @@ class SubscriptionManager:
         role_id = int(role_val) if isinstance(role_val, (int, float)) else (int(role_val) if isinstance(role_val, str) and role_val.isdigit() else None)
         instr_key = INSTR_BY_ROLE_ID.get(role_id) if role_id is not None else None
         instr_name = INSTR_DISPLAY_NAMES.get(instr_key, (instr_key or "Instrument").capitalize())
+        if instr_key == "band":
+            top_score = new_top.get("score") if new_top else Non
+            try:
+                score_str = f"{int(top_score):,}"
+            except Exception:
+                score_str = "?"
+            tie_count = sum(1 for r in (rows or []) if r.get("score") == top_score)
+            header_line = f"New top score: **{score_str}**"
+            if instr_key == "band" and tie_count > 1:
+                tied_names = [str(r.get("name","Unknown")) for r in rows if r.get("score") == (new_top or {}).get("score")]
+                embed.add_field(name="Band", value=", ".join(tied_names[:6]) + ("…" if len(tied_names) > 6 else ""), inline=False)
+
+        else:
+            header_line = f"New leader: {self._fmt_new_leader_line(top_row)}"
 
         # difficulty from the song's ranks for this instrument
         rank_val = (song.ranks or {}).get(instr_key) if (song and instr_key) else None
@@ -1569,8 +1668,8 @@ class SubscriptionManager:
                     top_row = await fetch_battle_top_winner(self.bot.http_session, bid)
 
                     # Decide whether to alert & update baseline
-                    changed = self._baseline_or_changed(bkey, top_row)
-                    self._set_baseline(bkey, top_row)
+                    changed = self._baseline_or_changed(bkey, top_row, battle)
+                    self._set_baseline(bkey, top_row, battle)
 
                     if changed:
                         count = self._overtakes().get(bkey, 0) + 1
