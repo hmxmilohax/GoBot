@@ -722,6 +722,23 @@ def _read_manager_state() -> dict:
     st.setdefault(SUBS_KEY, {})  # {battle_id: [user_ids]}
     st.setdefault(TOPS_KEY, {})  # {battle_id: {"name": "...", "score": 123}}
     st.setdefault(OVERTAKES_KEY, {})  # {battle_id: int}
+    omap = st.get(OVERTAKES_KEY) or {}
+    st[OVERTAKES_KEY] = {str(k): int(v) for k, v in omap.items()
+                         if isinstance(v, (int, float, str)) and str(v).lstrip("-").isdigit()}
+
+    # Seed missing live counts from any active (not yet announced) created_battles
+    for rec in st.get("created_battles", []):
+        if rec.get("winner_announced"):
+            continue  # finished battles get their final count stored on the record
+        bid = rec.get("battle_id")
+        if isinstance(bid, int):
+            bkey = str(bid)
+            if bkey not in st[OVERTAKES_KEY]:
+                ov = rec.get("overtakes", 0)
+                try:
+                    st[OVERTAKES_KEY][bkey] = int(ov)
+                except Exception:
+                    pass
     return st
 
 
@@ -857,11 +874,18 @@ class WeeklyBattleManager:
             song_part = song.name if song else f"ID {rec.get('song_id')}"
             artist_part = f" by _{song.artist}_" if song and song.artist else ""
 
-            if w:
-                winner_line = f"🏆 **{w['_name']}** — **{w['_score_str']}**"
-                if changes:
+            over_map = self.state.get(OVERTAKES_KEY, {}) or {}
+
+            for rec, w in winners:
+                bkey = str(rec["battle_id"])
+                changes = int(over_map.get(bkey, 0) or 0)
+
+                # ... build winner_line ...
+                winner_line = f"🏆 **{w['_name']}** — **{w['_score_str']}**" if w else "🚫 *No entries*"
+                if w and changes:
                     plural = "" if changes == 1 else "s"
                     winner_line += f" • **{changes}** overtake{plural}"
+
             else:
                 winner_line = "🚫 *No entries*"
 
@@ -898,14 +922,15 @@ class WeeklyBattleManager:
         async with self.lock:
             by_id = {r["battle_id"]: r for r in self.state.get("created_battles", [])}
             for rec, w in winners:
+                bkey = str(rec["battle_id"])
                 rid = rec["battle_id"]
                 if rid in by_id:
-                    # store normalized winner payload (or None if no entries)
                     by_id[rid]["winner"] = _winner_payload(w)
                     by_id[rid]["winner_announced"] = True
                     by_id[rid]["announced_at"] = _to_iso(_utcnow())
                     by_id[rid]["overtakes"] = int(over_map.get(bkey, 0) or 0)
                 over_map.pop(bkey, None)
+
             self.state[OVERTAKES_KEY] = over_map
             _write_manager_state(self.state)
 
