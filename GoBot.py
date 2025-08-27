@@ -1530,20 +1530,18 @@ class SubscriptionManager:
         role_id = int(role_val) if isinstance(role_val, (int, float)) else (int(role_val) if isinstance(role_val, str) and role_val.isdigit() else None)
         instr_key = INSTR_BY_ROLE_ID.get(role_id) if role_id is not None else None
         instr_name = INSTR_DISPLAY_NAMES.get(instr_key, (instr_key or "Instrument").capitalize())
-        if instr_key == "band":
-            top_score = new_top.get("score") if new_top else Non
-            try:
-                score_str = f"{int(top_score):,}"
-            except Exception:
-                score_str = "?"
-            tie_count = sum(1 for r in (rows or []) if r.get("score") == top_score)
-            header_line = f"New top score: **{score_str}**"
-            if instr_key == "band" and tie_count > 1:
-                tied_names = [str(r.get("name","Unknown")) for r in rows if r.get("score") == (new_top or {}).get("score")]
-                embed.add_field(name="Band", value=", ".join(tied_names[:6]) + ("…" if len(tied_names) > 6 else ""), inline=False)
 
-        else:
-            header_line = f"New leader: {self._fmt_new_leader_line(top_row)}"
+        # If it's a band battle and there's a tie for top score, list the names.
+        if instr_key == "band" and new_top:
+            top_score = new_top.get("score") if new_top else None  # <-- fix 'Non' -> None
+            tie_count = sum(1 for r in (rows or []) if r.get("score") == top_score)
+            if tie_count > 1:
+                tied_names = [str(r.get("name", "Unknown")) for r in rows if r.get("score") == top_score]
+                embed.add_field(
+                    name="Band",
+                    value=", ".join(tied_names[:6]) + ("…" if len(tied_names) > 6 else ""),
+                    inline=False
+                )
 
         # difficulty from the song's ranks for this instrument
         rank_val = (song.ranks or {}).get(instr_key) if (song and instr_key) else None
