@@ -28,7 +28,8 @@ BATTLES_URL = "https://gocentral-service.rbenhanced.rocks/battles"
 BATTLE_LB_URL = "https://gocentral-service.rbenhanced.rocks/leaderboards/battle"
 TOP_N = 10
 MANAGER_STATE_PATH = Path(__file__).resolve().parent / "battle_manager_state.json"
-AUTO_BATTLE_PERIOD_DAYS = 7
+AUTO_BATTLE_PERIOD_DAYS = 1
+BATTLE_DURATION_DAYS = 7
 SUBSCRIPTIONS_LOOP_SECONDS = 60
 SUBS_KEY = "battle_subscriptions"   # { "<battle_id>": [user_id, ...] }
 TOPS_KEY = "battle_top_seen"        # { "<battle_id>": {"name": "...", "score": 123} }
@@ -51,7 +52,7 @@ STOPWORDS = {
 # Source policy
 EXCLUDED_SOURCES = {"fnfestival", "beatles"}
 UGC_DOWNWEIGHT_SOURCES = {"ugc1", "ugc2"}
-UGC_WEIGHT_MULTIPLIER = 0.7
+UGC_WEIGHT_MULTIPLIER = 0.4
 
 def get_api_key() -> str:
     config = configparser.ConfigParser()
@@ -89,7 +90,7 @@ INSTR_ROLE_IDS: Dict[str, int] = {
 
 INSTR_BY_ROLE_ID: Dict[int, str] = {v: k for k, v in INSTR_ROLE_IDS.items()}
 INSTR_SET_WEEK = ["guitar", "bass", "drums", "vocals", "band"]
-PRO_ONE_PER_WEEK = ["proguitar", "probass", "prokeys"]
+PRO_ONE_PER_WEEK = ["proguitar", "probass", "prokeys", "prodrums", "harmony"]
 
 ALLOWED_RANDOM_INSTRUMENTS = [
     k for k in INSTR_ROLE_IDS.keys()
@@ -716,10 +717,12 @@ def _read_manager_state() -> dict:
     st.setdefault("enabled", False)
     st.setdefault("next_run_at", None)
     st.setdefault("created_battles", [])
-    st.setdefault("songs_per_run", 6)
+    st.setdefault("songs_per_run", 1)
     st.setdefault("last_run_at", None)
     st.setdefault("last_error", None)
     st.setdefault("week", 0)
+    st.setdefault("daily_core_pool", [])  # rotates through INSTR_SET_WEEK (Mon–Fri)
+    st.setdefault("daily_pro_pool", [])   # rotates through PRO_ONE_PER_WEEK (Sat–Sun)
     st.setdefault(SUBS_KEY, {})
     st.setdefault(TOPS_KEY, {})
     st.setdefault(OVERTAKES_KEY, {})
@@ -774,8 +777,8 @@ class WeeklyBattleManager:
             cur = int(self.state.get("songs_per_run") or 0)
         except Exception:
             cur = 0
-        if cur < 6:
-            self.state["songs_per_run"] = 6
+        if cur < 1:
+            self.state["songs_per_run"] = 1
             _write_manager_state(self.state)
         self.lock = asyncio.Lock()
         self.task = asyncio.create_task(self._loop())
@@ -793,6 +796,37 @@ class WeeklyBattleManager:
         # sort by expiry time
         recs.sort(key=lambda t: t[0])
         return [r for _, r in recs]
+
+    def _ensure_pool(self, key: str, all_values: list[str]) -> list[str]:
+        """Return the remaining pool for `key`, refilling with a new random order if empty."""
+        pool = list(self.state.get(key) or [])
+        if not pool:
+            pool = random.sample(all_values, k=len(all_values))
+            self.state[key] = pool
+            _write_manager_state(self.state)
+        return pool
+
+    def _pop_from_pool(self, key: str, all_values: list[str]) -> str:
+        pool = self._ensure_pool(key, all_values)
+        pick = pool.pop(0)              # pop the next instrument (randomized order)
+        self.state[key] = pool
+        _write_manager_state(self.state)
+        return pick
+
+    def _instrument_for_today(self, now: Optional[datetime] = None) -> str:
+        """Mon–Fri: cycle core instruments; Sat–Sun: cycle Pro instruments."""
+        now = now or _utcnow()
+        dow = now.weekday()  # Mon=0 ... Sun=6
+        if dow in (2, 6):    # Wed/Sun → Pro pool (no repeats until exhausted)
+            return self._pop_from_pool("daily_pro_pool", PRO_ONE_PER_WEEK)
+        else:                # Mon–Fri, not Wed → core pool (no repeats until exhausted)
+            return self._pop_from_pool("daily_core_pool", INSTR_SET_WEEK)
+
+    def _choose_daily_battle(self) -> Optional[tuple[Song, str]]:
+        """Pick today's instrument (from the proper pool), then a song for it."""
+        instr = self._instrument_for_today()
+        pair = self._pick_varied_by_genre([instr])
+        return pair[0] if pair else None
 
     async def _watch_expirations(self):
         await self.bot.wait_until_ready()
@@ -1077,7 +1111,6 @@ class WeeklyBattleManager:
     async def enable(self):
         async with self.lock:
             self.state["enabled"] = True
-            # schedule next run if not set
             if not self.state.get("next_run_at"):
                 self.state["next_run_at"] = _to_iso(_utcnow() + timedelta(days=AUTO_BATTLE_PERIOD_DAYS))
             _write_manager_state(self.state)
@@ -1245,53 +1278,44 @@ class WeeklyBattleManager:
                 await asyncio.sleep(10)
 
     async def run_once(self, count: Optional[int] = None) -> list[dict]:
-        """Create `count` battles now (default = state['songs_per_run']). Returns list of created battle records."""
-        if not self.bot.http_session or not self.bot.song_index:
-            raise RuntimeError("Bot not ready (HTTP session or song index missing).")
-        if count is None:
-            count = int(self.state.get("songs_per_run") or 0)
-        if count < 6:
-            count = 6
-            # persist the fix so future runs are correct too
+
+        now = _utcnow()
+        if now.weekday() == 0:  # Monday
             async with self.lock:
-                self.state["songs_per_run"] = 6
+                self.state["week"] = int(self.state.get("week") or 0) + 1
                 _write_manager_state(self.state)
 
-        # Determine next week number for titles/announcement
-        current_week = int(self.state.get("week") or 0)
-        next_week = 1 if current_week == 0 else current_week + 1
+        """Create exactly one daily battle (lasting 7 days)."""
+        if not self.bot.http_session or not self.bot.song_index:
+            raise RuntimeError("Bot not ready (HTTP session or song index missing).")
 
         created: list[dict] = []
-        for song, instr in self._choose_week_set(count):
-            rec = await self._create_one_battle(song=song, instr_key=instr, week_num=next_week)
-            if rec:
-                created.append(rec)
+        pick = self._choose_daily_battle()
+        if not pick:
+            async with self.lock:
+                self.state["last_error"] = "No viable song/instrument for today."
+                _write_manager_state(self.state)
+            return created
 
-        # update schedule
+        song, instr = pick
+        # Use current week number without incrementing daily
+        week_num = int(self.state.get("week") or 1)
+
+        rec = await self._create_one_battle(song=song, instr_key=instr, week_num=week_num)
+        if rec:
+            created.append(rec)
+
+        # update schedule (tomorrow), remember last run, persist created record(s)
         async with self.lock:
             self.state["last_run_at"] = _to_iso(_utcnow())
-
-            # schedule next run for *one hour after* this pack expires
             if self.state.get("enabled"):
-                exp_times = [
-                    _from_iso(r.get("expires_at"))
-                    for r in created if r.get("expires_at")
-                ]
-                exp_times = [t for t in exp_times if t]
-                if exp_times:
-                    next_dt = min(exp_times) + timedelta(seconds=NEXT_WEEK_GAP_SECONDS)
-                else:
-                    # fallback: 7 days + 1 hour
-                    next_dt = _utcnow() + timedelta(days=AUTO_BATTLE_PERIOD_DAYS, seconds=NEXT_WEEK_GAP_SECONDS)
-                self.state["next_run_at"] = _to_iso(next_dt)
-
+                self.state["next_run_at"] = _to_iso(_utcnow() + timedelta(days=AUTO_BATTLE_PERIOD_DAYS))
             self.state["created_battles"].extend(created)
             _write_manager_state(self.state)
 
-
-        # Post pack announcement & bump week counter
+        # Announce (don't bump week on a daily post)
         if created:
-            await self.post_announcement(created, increment_week=True)
+            await self.post_announcement(created, increment_week=False)
 
         return created
 
@@ -1308,8 +1332,8 @@ class WeeklyBattleManager:
         title = f"Score Snipe, Week {week_num} {INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())}"
         description = f"{song.name} — {song.artist} (ID {song.song_id})"
 
-        starts_at = _to_iso(_utcnow())
-        expires_at = _to_iso(_utcnow() + timedelta(days=7))
+        starts_at  = _to_iso(_utcnow())
+        expires_at = _to_iso(_utcnow() + timedelta(days=BATTLE_DURATION_DAYS))
 
         payload = {
             "title": title,
@@ -2698,10 +2722,12 @@ async def info_cmd(interaction: discord.Interaction):
 
     desc = []
     desc.append(f"**What I can do**\n• " + "\n• ".join(what_i_do))
-    desc.append(f"\n**Weekly format**\n• {weekly_core}\n• {weekly_pro}\n")
+    weekly_core = "Mon–Fri: one battle daily cycling **Guitar, Bass, Drums, Vocals, Band** (no repeats until all used)"
+    weekly_pro  = "Sat–Sun: one **random Pro** battle each day (Pro Guitar/Pro Bass/Pro Keys), cycling without repeats"
+    desc.append(f"\n**Daily format**\n• {weekly_core}\n• {weekly_pro}\n")
     desc.append("\n**Song selection rules**\n• " + "\n• ".join(rules))
     desc.append("\n**Quick start**\n• " + "\n• ".join(quick_start))
-    desc.append("\n**Timing**\n• Battles last **7 days**; next pack starts ~**1 hour** after the last one ends.")
+    desc.append("\n**Timing**\n• One new battle **every day**, each lasts **7 days**.")
 
     embed = discord.Embed(
         title="Score Snipe — Info",
