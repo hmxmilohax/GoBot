@@ -711,6 +711,7 @@ def _read_manager_state() -> dict:
             st = {}
     else:
         st = {}
+
     # defaults
     st.setdefault("enabled", False)
     st.setdefault("next_run_at", None)
@@ -719,26 +720,34 @@ def _read_manager_state() -> dict:
     st.setdefault("last_run_at", None)
     st.setdefault("last_error", None)
     st.setdefault("week", 0)
-    st.setdefault(SUBS_KEY, {})  # {battle_id: [user_ids]}
-    st.setdefault(TOPS_KEY, {})  # {battle_id: {"name": "...", "score": 123}}
-    st.setdefault(OVERTAKES_KEY, {})  # {battle_id: int}
-    omap = st.get(OVERTAKES_KEY) or {}
-    st[OVERTAKES_KEY] = {str(k): int(v) for k, v in omap.items()
-                         if isinstance(v, (int, float, str)) and str(v).lstrip("-").isdigit()}
+    st.setdefault(SUBS_KEY, {})
+    st.setdefault(TOPS_KEY, {})
+    st.setdefault(OVERTAKES_KEY, {})
 
-    # Seed missing live counts from any active (not yet announced) created_battles
+    # --- Normalize LIVE overtake map (more permissive: trims strings) ---
+    live = {}
+    for k, v in (st.get(OVERTAKES_KEY) or {}).items():
+        try:
+            live[str(k)] = int(str(v).strip())
+        except Exception:
+            continue
+    st[OVERTAKES_KEY] = live
+
+    # --- Merge from active created_battles; prefer the larger (manual edits respected) ---
     for rec in st.get("created_battles", []):
         if rec.get("winner_announced"):
-            continue  # finished battles get their final count stored on the record
+            continue  # finished battles are snapshots only
         bid = rec.get("battle_id")
         if isinstance(bid, int):
             bkey = str(bid)
-            if bkey not in st[OVERTAKES_KEY]:
-                ov = rec.get("overtakes", 0)
-                try:
-                    st[OVERTAKES_KEY][bkey] = int(ov)
-                except Exception:
-                    pass
+            try:
+                ov_rec = int(str(rec.get("overtakes", 0)).strip())
+            except Exception:
+                ov_rec = 0
+            ov_live = int(live.get(bkey, 0))
+            if ov_rec > ov_live:
+                live[bkey] = ov_rec
+
     return st
 
 
