@@ -90,7 +90,8 @@ INSTR_ROLE_IDS: Dict[str, int] = {
 
 INSTR_BY_ROLE_ID: Dict[int, str] = {v: k for k, v in INSTR_ROLE_IDS.items()}
 INSTR_SET_WEEK = ["guitar", "bass", "drums", "vocals", "band"]
-PRO_ONE_PER_WEEK = ["proguitar", "probass", "prokeys", "prodrums", "harmony"]
+PRO_ONE_PER_WEEK = ["proguitar", "probass", "prokeys", "prodrums", "harmony", "keys"]
+_ALIAS_TO_BASE = {"prodrums": "drums", "harmony": "vocals"}
 
 ALLOWED_RANDOM_INSTRUMENTS = [
     k for k in INSTR_ROLE_IDS.keys()
@@ -191,6 +192,8 @@ DIFF_THRESHOLDS = {
     "probass":    [150, 208, 267, 325, 384, 442],
 }
 
+DIFF_THRESHOLDS["harmony"] = DIFF_THRESHOLDS["vocals"]
+DIFF_THRESHOLDS.setdefault("prodrums", DIFF_THRESHOLDS["drums"])
 DIFF_MAP = {1: "Easy", 2: "Medium", 3: "Hard", 4: "Expert"}
 DIFF_LETTER = {1: "E", 2: "M", 3: "H", 4: "X"}
 
@@ -208,6 +211,9 @@ INSTR_EMOJI = {
     "proguitar": "🎸",
     "probass": "🎸",
     "prokeys": "🎹",
+    "prodrums": "🥁",
+    "harmony": "🎤",
+    "keys": "🎹",
 }
 
 INSTR_COLOR = {
@@ -216,6 +222,12 @@ INSTR_COLOR = {
     "drums":  0xEF4444,  # red
     "vocals": 0x8B5CF6,  # violet
     "band":   0x3B82F6,  # blue
+    "prodrums": 0xEF4444,
+    "proguitar": 0xF59E0B,
+    "harmony":  0x8B5CF6,
+    "keys":     0x22C55E,
+    "probass": 0x10B981,
+    "prokeys": 0x22C55E,
 }
 
 # Map rank keys from the DTA to our instrument keys
@@ -235,6 +247,8 @@ RANK_KEY_MAP = {
 def _to_unix_ts(dt: datetime) -> int:
     return int(dt.replace(tzinfo=timezone.utc).timestamp())
 
+def _base_part(instr_key: str) -> str:
+    return _ALIAS_TO_BASE.get(instr_key, instr_key)
 
 @dataclass
 class Song:
@@ -628,9 +642,14 @@ def difficulty_bucket_index(instr_key: str, rank_val: Optional[int]) -> Optional
             return i
     return 0
 
+def _th_key(instr: str) -> str:
+    return {"harmony": "vocals", "prodrums": "drums"}.get(instr, instr)
+
+def _rank(song: Song, instr: str) -> Optional[int]:
+    return (song.ranks or {}).get(_base_part(instr))
+
 def has_part(song: Song, instr_key: str) -> bool:
-    """True if the song lists a rank for instr_key and it's > 0."""
-    v = (song.ranks or {}).get(instr_key)
+    v = (song.ranks or {}).get(_base_part(instr_key))
     return isinstance(v, int) and v > 0
 
 def load_song_map(path: Path) -> SongIndex:
@@ -726,6 +745,7 @@ def _read_manager_state() -> dict:
     st.setdefault(SUBS_KEY, {})
     st.setdefault(TOPS_KEY, {})
     st.setdefault(OVERTAKES_KEY, {})
+    st.setdefault("last_week_increment_at", None)
 
     # --- Normalize LIVE overtake map (more permissive: trims strings) ---
     live = {}
@@ -1046,8 +1066,8 @@ class WeeklyBattleManager:
             # Build weights
             items, weights = [], []
             for s in viable:
-                rank_val = (s.ranks or {}).get(instr)
-                b = difficulty_bucket_index(instr, rank_val)
+                rank_val = _rank(s, instr)
+                b = difficulty_bucket_index(_th_key(instr), rank_val)
                 if b is None:
                     continue
 
@@ -1081,9 +1101,9 @@ class WeeklyBattleManager:
                 used_genres.add(pick.genre.lower())
 
             # Track used difficulty bucket
-            b = difficulty_bucket_index(instr, (pick.ranks or {}).get(instr))
-            if b is not None:
-                used_buckets[b] = used_buckets.get(b, 0) + 1
+            b_used = difficulty_bucket_index(_th_key(instr), _rank(pick, instr))
+            if b_used is not None:
+                used_buckets[b_used] = used_buckets.get(b_used, 0) + 1
 
         return chosen
 
@@ -1180,8 +1200,8 @@ class WeeklyBattleManager:
             emoji = INSTR_EMOJI.get(instr_key, "🎵")
             if song:
                 thumb = await fetch_song_art_url(self.bot.http_session, song.slug)
-                rank_val = (song.ranks or {}).get(instr_key)
-                diff_txt = difficulty_label(instr_key, rank_val)
+                rank_val = _rank(song, instr_key)
+                diff_txt = difficulty_label(_th_key(instr_key), rank_val)
                 summary_lines.append(
                     f"{emoji} **{INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())}** — "
                     f"**{song.name}** *by {song.artist}* • *{diff_txt}*"
@@ -1219,8 +1239,8 @@ class WeeklyBattleManager:
                 if song.year:
                     album_line = f"{album_line} ({song.year})"
                 author = getattr(song, "author", None) or "—"
-                rank_val = (getattr(song, "ranks", {}) or {}).get(instr_key)
-                diff_txt = difficulty_label(instr_key, rank_val)
+                rank_val = _rank(song, instr_key)
+                diff_txt = difficulty_label(_th_key(instr_key), rank_val)
 
                 # Row 1: Artist | Album  (+ pad)
                 e.add_field(name="Artist", value=artist, inline=True)
@@ -1278,34 +1298,27 @@ class WeeklyBattleManager:
                 await asyncio.sleep(10)
 
     async def run_once(self, count: Optional[int] = None) -> list[dict]:
-
         now = _utcnow()
-        if now.weekday() == 0:  # Monday
-            async with self.lock:
-                self.state["week"] = int(self.state.get("week") or 0) + 1
-                _write_manager_state(self.state)
+        if now.weekday() == 4:  # Friday
+            last_inc = _from_iso(self.state.get("last_week_increment_at"))
+            if not last_inc or last_inc.date() != now.date():
+                async with self.lock:
+                    cur = int(self.state.get("week") or 0)
+                    self.state["week"] = cur + 1 if cur >= 1 else 1  # start at 1 if unset
+                    self.state["last_week_increment_at"] = _to_iso(now)
+                    _write_manager_state(self.state)
 
-        """Create exactly one daily battle (lasting 7 days)."""
-        if not self.bot.http_session or not self.bot.song_index:
-            raise RuntimeError("Bot not ready (HTTP session or song index missing).")
-
+        n = max(1, int(count or 1))
         created: list[dict] = []
-        pick = self._choose_daily_battle()
-        if not pick:
-            async with self.lock:
-                self.state["last_error"] = "No viable song/instrument for today."
-                _write_manager_state(self.state)
-            return created
+        for _ in range(n):
+            pick = self._choose_daily_battle()
+            if not pick:
+                break
+            song, instr = pick
+            rec = await self._create_one_battle(song=song, instr_key=instr, week_num=int(self.state.get("week") or 1))
+            if rec:
+                created.append(rec)
 
-        song, instr = pick
-        # Use current week number without incrementing daily
-        week_num = int(self.state.get("week") or 1)
-
-        rec = await self._create_one_battle(song=song, instr_key=instr, week_num=week_num)
-        if rec:
-            created.append(rec)
-
-        # update schedule (tomorrow), remember last run, persist created record(s)
         async with self.lock:
             self.state["last_run_at"] = _to_iso(_utcnow())
             if self.state.get("enabled"):
@@ -1313,10 +1326,8 @@ class WeeklyBattleManager:
             self.state["created_battles"].extend(created)
             _write_manager_state(self.state)
 
-        # Announce (don't bump week on a daily post)
         if created:
             await self.post_announcement(created, increment_week=False)
-
         return created
 
     def _pick_random_song(self) -> Song:
@@ -1331,6 +1342,13 @@ class WeeklyBattleManager:
         role_id = INSTR_ROLE_IDS[instr_key]
         title = f"Score Snipe, Week {week_num} {INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())}"
         description = f"{song.name} — {song.artist} (ID {song.song_id})"
+
+        api_key = get_api_key()
+        if not api_key:
+            async with self.lock:
+                self.state["last_error"] = "Create failed: missing API key"
+                _write_manager_state(self.state)
+            return None
 
         starts_at  = _to_iso(_utcnow())
         expires_at = _to_iso(_utcnow() + timedelta(days=BATTLE_DURATION_DAYS))
@@ -2096,16 +2114,6 @@ class LeaderboardView(discord.ui.View):
         self.message: Optional[discord.Message] = None
         self._refresh_buttons()
 
-    async def on_timeout(self):
-        try:
-            for item in self.children:
-                item.disabled = True
-            if self.message:
-                await self.message.edit(view=self)
-        except Exception:
-            pass
-
-
     def _refresh_buttons(self):
         self.clear_items()
         total_pages = max(1, (len(self.all_rows) + self.page_size - 1) // self.page_size)
@@ -2253,7 +2261,7 @@ class FindPlayerModal(discord.ui.Modal, title="Find a player"):
                 idx = i
                 break
         if idx is None:
-            await interaction.response.send_message(f"No player matching '{query}'.")
+            await interaction.response.send_message(f"No player matching '{query}'.", ephemeral=True)
             return
         self.view.highlight_index = idx
         self.view.page = idx // self.view.page_size
@@ -2700,7 +2708,7 @@ async def info_cmd(interaction: discord.Interaction):
 
     # quick facts
     weekly_core = "Guitar, Bass, Drums (non-Pro), Vocals (no Harmonies)"
-    weekly_pro  = "One Pro slot weekly: Pro Guitar, Pro Keys, or Pro Bass (picked at random)"
+    weekly_pro  = "Two Pro slots weekly: Pro Guitar, Pro Keys, Pro Drums, Pro Bass, Harmonies or Standard Keys (picked at random)"
     rules = [
         "Official content + Rock Band Network only for now",
         "No **Festival** or **Beatles** songs. RB4 is allowed",
@@ -2722,8 +2730,8 @@ async def info_cmd(interaction: discord.Interaction):
 
     desc = []
     desc.append(f"**What I can do**\n• " + "\n• ".join(what_i_do))
-    weekly_core = "Mon–Fri: one battle daily cycling **Guitar, Bass, Drums, Vocals, Band** (no repeats until all used)"
-    weekly_pro  = "Sat–Sun: one **random Pro** battle each day (Pro Guitar/Pro Bass/Pro Keys), cycling without repeats"
+    weekly_core = "Mon–Sat, not Wed: one battle daily cycling **Guitar, Bass, Drums, Vocals, Band** (no repeats until all used)"
+    weekly_pro  = "Wed & Sun: one **random Pro** battle each day (Pro Guitar/Pro Bass/Pro Keys), cycling without repeats"
     desc.append(f"\n**Daily format**\n• {weekly_core}\n• {weekly_pro}\n")
     desc.append("\n**Song selection rules**\n• " + "\n• ".join(rules))
     desc.append("\n**Quick start**\n• " + "\n• ".join(quick_start))
