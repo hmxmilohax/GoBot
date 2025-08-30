@@ -92,7 +92,7 @@ INSTR_BY_ROLE_ID: Dict[int, str] = {v: k for k, v in INSTR_ROLE_IDS.items()}
 INSTR_SET_WEEK = ["guitar", "bass", "drums", "vocals", "band"]
 PRO_ONE_PER_WEEK = ["proguitar", "probass", "prokeys", "prodrums", "harmony", "keys"]
 _ALIAS_TO_BASE = {"prodrums": "drums", "harmony": "vocals"}
-
+LINKS_KEY = "player_links"  # { "<discord_user_id>": [display_name, ...] }
 ALLOWED_RANDOM_INSTRUMENTS = [
     k for k in INSTR_ROLE_IDS.keys()
     if k not in ("proguitar", "probass", "prokeys", "keys")
@@ -746,6 +746,7 @@ def _read_manager_state() -> dict:
     st.setdefault(TOPS_KEY, {})
     st.setdefault(OVERTAKES_KEY, {})
     st.setdefault("last_week_increment_at", None)
+    st.setdefault(LINKS_KEY, {})  # NEW: { "<discord_user_id>": [display_name, ...] }
 
     # --- Normalize LIVE overtake map (more permissive: trims strings) ---
     live = {}
@@ -773,6 +774,49 @@ def _read_manager_state() -> dict:
 
     return st
 
+def _strip_platform_tags(name: str) -> str:
+    s = (name or "").strip()
+    # remove any number of trailing bracketed tags: "jnack [RPCS3] (modded)" -> "jnack"
+    while True:
+        new = re.sub(r"\s*[\[(][^\[\]()]{1,32}[\])]\s*$", "", s)
+        if new == s:
+            break
+        s = new
+    return s.strip()
+
+def _norm_link_name(name: str) -> str:
+    # case-insensitive, accent-insensitive, collapse spaces
+    s = unicodedata.normalize("NFKD", _strip_platform_tags(name)).encode("ascii", "ignore").decode("ascii")
+    s = re.sub(r"\s+", " ", s).strip().lower()
+    return s
+
+def _user_links(state: dict, user_id: int) -> list[str]:
+    book = state.setdefault(LINKS_KEY, {})
+    return list(book.get(str(user_id), []))
+
+def _save_user_links(state: dict, user_id: int, names: list[str]) -> None:
+    book = state.setdefault(LINKS_KEY, {})
+    # keep unique by normalized name, preserve first display form order
+    seen = set()
+    out = []
+    for n in names:
+        key = _norm_link_name(n)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(_strip_platform_tags(n))
+    book[str(user_id)] = out
+
+def _link_owner_user_id(state: dict, norm_key: str) -> Optional[int]:
+    book = state.get(LINKS_KEY, {}) or {}
+    for uid_str, names in book.items():
+        for n in (names or []):
+            if _norm_link_name(n) == norm_key:
+                try:
+                    return int(uid_str)
+                except Exception:
+                    return None
+    return None
 
 def _winner_payload(row: Optional[dict]) -> Optional[dict]:
     if not row:
@@ -2743,6 +2787,92 @@ async def info_cmd(interaction: discord.Interaction):
         color=0x3B82F6
     )
     await interaction.followup.send(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="link", description="Link your Discord to a leaderboard name (platform tags are ignored).")
+@app_commands.describe(name='Leaderboard name, e.g. "jnackmilo" (you don\'t need [RPCS3]/[Xenia])')
+async def link_cmd(interaction: discord.Interaction, name: str):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    if not bot.manager:
+        await interaction.followup.send("Manager not ready.", ephemeral=True)
+        return
+
+    display = _strip_platform_tags(name)
+    key = _norm_link_name(name)
+    if not key:
+        await interaction.followup.send("Provide a non-empty name.", ephemeral=True)
+        return
+
+    async with bot.manager.lock:
+        st = bot.manager.state
+
+        # Global uniqueness check
+        owner = _link_owner_user_id(st, key)
+        if owner is not None and owner != interaction.user.id:
+            await interaction.followup.send(
+                "That leaderboard name is already linked by another Discord account.",
+                ephemeral=True
+            )
+            return
+
+        current = _user_links(st, interaction.user.id)
+
+        # If user already linked this (maybe different display), update the display
+        idx_by_norm = {_norm_link_name(n): i for i, n in enumerate(current)}
+        if key in idx_by_norm:
+            i = idx_by_norm[key]
+            if _strip_platform_tags(current[i]) != display:
+                current[i] = display
+                _save_user_links(st, interaction.user.id, current)
+                _write_manager_state(st)
+                final = _user_links(st, interaction.user.id)
+                pretty = ", ".join(f"**{n}**" for n in final) if final else "—"
+                await interaction.followup.send(f"Updated to **{display}**.\nYour linked names: {pretty}", ephemeral=True)
+                return
+            # no change
+            final = _user_links(st, interaction.user.id)
+            pretty = ", ".join(f"**{n}**" for n in final) if final else "—"
+            await interaction.followup.send(f"You're already linked to **{display}**.\nYour linked names: {pretty}", ephemeral=True)
+            return
+
+        # Add new link
+        current.append(display)
+        _save_user_links(st, interaction.user.id, current)
+        _write_manager_state(st)
+
+    final = _user_links(bot.manager.state, interaction.user.id)
+    pretty = ", ".join(f"**{n}**" for n in final) if final else "—"
+    await interaction.followup.send(f"Linked to **{display}**.\nYour linked names: {pretty}", ephemeral=True)
+
+
+@bot.tree.command(name="unlink", description="Remove a linked leaderboard name (platform tags are ignored).")
+@app_commands.describe(name='Leaderboard name to remove, e.g. "jnackmilo" (you can include tags like [RPCS3])')
+async def unlink_cmd(interaction: discord.Interaction, name: str):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    if not bot.manager:
+        await interaction.followup.send("Manager not ready.", ephemeral=True)
+        return
+
+    key = _norm_link_name(name)
+    if not key:
+        await interaction.followup.send("Provide a non-empty name.", ephemeral=True)
+        return
+
+    async with bot.manager.lock:
+        st = bot.manager.state
+        current = _user_links(st, interaction.user.id)
+        kept = [n for n in current if _norm_link_name(n) != key]
+        if len(kept) == len(current):
+            await interaction.followup.send("No matching linked name found to remove.", ephemeral=True)
+            return
+        _save_user_links(st, interaction.user.id, kept)
+        _write_manager_state(st)
+
+    final = _user_links(bot.manager.state, interaction.user.id)
+    pretty = ", ".join(f"**{n}**" for n in final) if final else "—"
+    await interaction.followup.send(f"Unlinked.\nYour linked names: {pretty}", ephemeral=True)
+
 
 
 @bot.tree.command(
