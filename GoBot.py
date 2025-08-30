@@ -66,7 +66,8 @@ def _load_discord_ids():
         "admin_user_id": cfg.getint("discord", "admin_id", fallback=ADMIN_USER_ID),
         "announce_channel_id": cfg.getint("discord", "announce_channel_id", fallback=None),
         "ping_role_id": cfg.getint("discord", "ping_role_id", fallback=None),
-        "overtakes_channel_id": cfg.getint("discord", "overtakes_channel_id", fallback=None),  # NEW
+        "overtakes_channel_id": cfg.getint("discord", "overtakes_channel_id", fallback=None),
+        "guild_id": cfg.getint("guild", "id", fallback=cfg.getint("discord", "guild_id", fallback=None)),
     }
 
 INSTR_ROLE_IDS: Dict[str, int] = {
@@ -1917,7 +1918,9 @@ class LBClient(discord.Client):
         self.admin_user_id = ids["admin_user_id"]
         self.announce_channel_id = ids["announce_channel_id"]
         self.ping_role_id = ids["ping_role_id"]
-        self.overtakes_channel_id = ids["overtakes_channel_id"]  # NEW
+        self.overtakes_channel_id = ids["overtakes_channel_id"]
+        self.dev_guild_id = ids["guild_id"]
+        self.dev_guild = discord.Object(id=self.dev_guild_id) if self.dev_guild_id else None
         self.subscriptions: Optional[SubscriptionManager] = None
 
     async def setup_hook(self) -> None:
@@ -1925,7 +1928,18 @@ class LBClient(discord.Client):
         self.http_session = aiohttp.ClientSession()
         self.manager = WeeklyBattleManager(self)
         self.subscriptions = SubscriptionManager(self)
-        await self.tree.sync()
+        if self.dev_guild:
+            try:
+                # mirror all current commands into the guild and sync them
+                self.tree.clear_commands(guild=self.dev_guild)
+                self.tree.copy_global_to(guild=self.dev_guild)
+                synced = await self.tree.sync(guild=self.dev_guild)
+                print(f"Synced {len(synced)} guild commands")
+            except Exception as e:
+                print(f"[WARN] Guild sync failed: {e!r}")
+        else:
+            # Fallback: keep global sync if no guild id configured
+            await self.tree.sync()
 
     async def close(self) -> None:
         if self.http_session:
