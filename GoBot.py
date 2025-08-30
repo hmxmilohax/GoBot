@@ -1599,15 +1599,21 @@ class SubscriptionManager:
         broadcast_channel_id: Optional[int] = None,
         overtake_count: Optional[int] = None,
     ):
+        # Table + header lines
         desc = format_battle_rows(rows or [], max_n=TOP_N)
         title = f"🥇 Overtake Alert — {battle.get('title','(untitled)')}"
         header_line = f"New leader: {self._fmt_new_leader_line(new_top)}"
         changes_line = f"Overtakes so far: **{overtake_count}**" if isinstance(overtake_count, int) else None
         head = "\n".join([l for l in (header_line, changes_line) if l])
 
+        # 👇 NEW: put the song title as the very first line under the header
+        sid = self._extract_song_id(battle)
+        song = self.bot.song_index.by_id.get(sid) if (sid and self.bot.song_index) else None  # type: ignore
+        song_title_line = f"# {song.name}" if song else f"# Song ID {sid or 'Unknown'}"
+
         embed = discord.Embed(
             title=title,
-            description=f"{head}\n\n{desc}",
+            description="\n".join([song_title_line, head, "", desc]),  # song title → header lines → blank → table
             color=0xF97316
         )
 
