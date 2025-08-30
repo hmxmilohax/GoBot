@@ -1928,18 +1928,30 @@ class LBClient(discord.Client):
         self.http_session = aiohttp.ClientSession()
         self.manager = WeeklyBattleManager(self)
         self.subscriptions = SubscriptionManager(self)
-        if self.dev_guild:
+
+        # --- Guild-only commands, like your example bot ---
+        if getattr(self, "dev_guild_id", None):
+            guild = discord.Object(id=self.dev_guild_id)
+
+            # 1) Rebuild the guild command set from your global definitions
+            #    (clears old guild copies to avoid stale dupes)
+            self.tree.clear_commands(guild=guild)
+            self.tree.copy_global_to(guild=guild)
+            synced = await self.tree.sync(guild=guild)
+            print(f"Synced {len(synced)} guild commands to {self.dev_guild_id}")
+
+            # 2) PURGE GLOBAL COMMANDS so they don't also appear in the guild
+            #    (safe to run every boot; removes any globally-registered duplicates)
+            self.tree.clear_commands(guild=None)   # ← keyword-only arg; None targets GLOBAL registry
             try:
-                # mirror all current commands into the guild and sync them
-                self.tree.clear_commands(guild=self.dev_guild)
-                self.tree.copy_global_to(guild=self.dev_guild)
-                synced = await self.tree.sync(guild=self.dev_guild)
-                print(f"Synced {len(synced)} guild commands")
+                await self.tree.sync()             # push the empty global set to Discord (deletes globals)
+                print("Cleared global commands")
             except Exception as e:
-                print(f"[WARN] Guild sync failed: {e!r}")
+                print(f"[WARN] Clearing global commands failed: {e!r}")
         else:
-            # Fallback: keep global sync if no guild id configured
-            await self.tree.sync()
+            # Fallback: no guild configured → keep global sync
+            synced = await self.tree.sync()
+            print(f"Synced {len(synced)} global commands")
 
     async def close(self) -> None:
         if self.http_session:
