@@ -1253,9 +1253,19 @@ class WeeklyBattleManager:
             else:
                 summary_lines.append(f"{emoji} **{INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())}** — *Unknown song* (ID {r.get('song_id')})")
 
+        reminder = (
+            "Reminder: Visit `Quickplay>Setlists / Battles` to find the battles. "
+            "Playing the song by itself in normal quickplay will not count."
+        )
+
         header = discord.Embed(
             title=f"Score Snipe — Week {week}",
-            description="New battles are live! Good luck. 🔥" + ends_txt + "\n\n" + "\n".join(summary_lines),
+            description="New battles are live! Good luck. 🔥"
+                        + ends_txt
+                        + "\n\n"
+                        + reminder
+                        + "\n\n"
+                        + "\n".join(summary_lines),
             color=0x22C55E,  # green accent for the pack header
         )
 
@@ -2756,35 +2766,45 @@ async def info_cmd(interaction: discord.Interaction):
     except Exception:
         pass
 
-    # quick facts
-    weekly_core = "Guitar, Bass, Drums (non-Pro), Vocals (no Harmonies)"
-    weekly_pro  = "Two Pro slots weekly: Pro Guitar, Pro Keys, Pro Drums, Pro Bass, Harmonies or Standard Keys (picked at random)"
+    # what I do (now includes link/unlink)
+    what_i_do = [
+        "`/battles` — browse active battles, and subscribe for notifications",
+        "`/leaderboards <song> [instrument]` — view a song’s top scores",
+        "`/link <leaderboard name>` — link your Discord to your in-game leaderboard name (tags like [RPCS3]/[Xenia] are ignored)",
+        "`/unlink <leaderboard name>` — remove a linked name",
+        "`/info` — print this info",
+    ]
+
+    # daily format (kept)
+    weekly_core = "Mon–Sat, not Wed: one battle daily cycling **Guitar, Bass, Drums, Vocals, Band** (no repeats until all used)"
+    weekly_pro  = "Wed & Sun: one **random Pro** battle each day (Pro Guitar/Pro Bass/Pro Keys), cycling without repeats"
+
     rules = [
         "Official content + Rock Band Network only for now",
         "No **Festival** or **Beatles** songs. RB4 is allowed",
         "No **2x bass pedal** versions",
     ]
 
-    what_i_do = [
-        "`/battles` — browse active battles, and subscribe for notifications",
-        "`/leaderboards <song> [instrument]` — view a song’s top scores",
-        "`/info` — print this info",
-    ]
-
     quick_start = [
         "Open `/battles`, pick a card, play the chart, post your best.",
-        "In game, go to Quickplay > Setlists to find the battle.",
-        "Quickplay alone will NOT count toward battles.",
+        "In game, go to `Quickplay > Setlists / Battles` to find the battle.",
+        "Playing the song by itself in normal quickplay will **not** count toward the battle.",
         "Use `/leaderboards` anytime to check global standings.",
+    ]
+
+    # NEW: linking section
+    linking = [
+        "Use `/link <leaderboard name>` to associate your Discord with your GoCentral leaderboard name.",
+        "Platform tags like `[RPCS3]`, `[Xenia]`, etc. are ignored — just use the name as shown.",
+        "You can link **multiple names** (e.g., alts). Use `/unlink` to remove one later.",
     ]
 
     desc = []
     desc.append(f"**What I can do**\n• " + "\n• ".join(what_i_do))
-    weekly_core = "Mon–Sat, not Wed: one battle daily cycling **Guitar, Bass, Drums, Vocals, Band** (no repeats until all used)"
-    weekly_pro  = "Wed & Sun: one **random Pro** battle each day (Pro Guitar/Pro Bass/Pro Keys), cycling without repeats"
     desc.append(f"\n**Daily format**\n• {weekly_core}\n• {weekly_pro}\n")
     desc.append("\n**Song selection rules**\n• " + "\n• ".join(rules))
     desc.append("\n**Quick start**\n• " + "\n• ".join(quick_start))
+    desc.append("\n**Link your account**\n• " + "\n• ".join(linking))
     desc.append("\n**Timing**\n• One new battle **every day**, each lasts **7 days**.")
 
     embed = discord.Embed(
@@ -2793,6 +2813,7 @@ async def info_cmd(interaction: discord.Interaction):
         color=0x3B82F6
     )
     await interaction.followup.send(embed=embed, ephemeral=True)
+
 
 @bot.tree.command(name="link", description="Link your Discord to a leaderboard name (platform tags are ignored).")
 @app_commands.describe(name='Leaderboard name, e.g. "jnackmilo" (you don\'t need [RPCS3]/[Xenia])')
