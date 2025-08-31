@@ -3054,7 +3054,7 @@ async def continue_battle_create(interaction: discord.Interaction, song_obj: Son
 @bot.tree.command(name="info", description="What I can do + weekly battle rules.")
 async def info_cmd(interaction: discord.Interaction):
     # keep it tidy for the channel
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer()
 
     # pull current limits if available
     max_battles = 6
@@ -3110,7 +3110,7 @@ async def info_cmd(interaction: discord.Interaction):
         description="\n".join(desc),
         color=0x3B82F6
     )
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed)
 
 
 @bot.tree.command(name="link", description="Link your Discord to a leaderboard name (platform tags are ignored).")
