@@ -1897,6 +1897,8 @@ class SubscriptionManager:
         role_val = battle.get("instrument")
         role_id = int(role_val) if isinstance(role_val, (int, float)) else (int(role_val) if isinstance(role_val, str) and role_val.isdigit() else None)
         instr_key = INSTR_BY_ROLE_ID.get(role_id) if role_id is not None else None
+        # Human-readable instrument name for the embed
+        instr_name = INSTR_DISPLAY_NAMES.get(instr_key or "", (instr_key or "Instrument").capitalize())
 
         limit = BAND_TOP_N if instr_key == "band" else TOP_N
 
@@ -1918,7 +1920,7 @@ class SubscriptionManager:
 
         # difficulty from the song's ranks for this instrument
         rank_val = (song.ranks or {}).get(instr_key) if (song and instr_key) else None
-        diff_txt = difficulty_label(instr_key, rank_val) if instr_key else "—"
+        diff_txt = difficulty_label(_th_key(instr_key or ""), rank_val) if instr_key else "—"
 
         if song:
             artist = song.artist or "—"
