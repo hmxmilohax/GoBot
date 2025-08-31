@@ -27,6 +27,7 @@ LEADERBOARDS_URL = "https://gocentral-service.rbenhanced.rocks/leaderboards"
 BATTLES_URL = "https://gocentral-service.rbenhanced.rocks/battles"
 BATTLE_LB_URL = "https://gocentral-service.rbenhanced.rocks/leaderboards/battle"
 TOP_N = 10
+BAND_TOP_N = 15
 MANAGER_STATE_PATH = Path(__file__).resolve().parent / "battle_manager_state.json"
 AUTO_BATTLE_PERIOD_DAYS = 1
 BATTLE_DURATION_DAYS = 7
@@ -40,6 +41,10 @@ BASE_URL = "https://gocentral-service.rbenhanced.rocks"
 CREATE_BATTLE_URL = f"{BASE_URL}/admin/battles/create"
 DELETE_BATTLE_URL = f"{BASE_URL}/admin/battles"
 ADMIN_USER_ID = 960524988824313876 #jnack
+
+# Champion role for weekly winners
+CHAMPION_ROLE_ID = 1411137812274872412
+CHAMPION_GRANTS_KEY = "champion_role_grants"  # [{user_id, role_id, battle_id, granted_at, expires_at, removed_at, active}]
 
 WINNERS_BATCH_WINDOW_SECONDS = 300   # group endings within 5 minutes into one announcement
 RESULTS_GRACE_SECONDS = 5            # small buffer after expiry before fetching results
@@ -250,6 +255,23 @@ def _to_unix_ts(dt: datetime) -> int:
 
 def _base_part(instr_key: str) -> str:
     return _ALIAS_TO_BASE.get(instr_key, instr_key)
+
+def _as_dt(v) -> Optional[datetime]:
+    """Accepts epoch int/float, digit string, or ISO8601 → timezone-aware UTC datetime."""
+    if isinstance(v, (int, float)):
+        return datetime.utcfromtimestamp(int(v)).replace(tzinfo=timezone.utc)
+    if isinstance(v, str):
+        s = v.strip()
+        if s.isdigit():
+            return datetime.utcfromtimestamp(int(s)).replace(tzinfo=timezone.utc)
+        return _from_iso(s)
+    return None
+
+def _as_int(v) -> Optional[int]:
+    try:
+        return int(str(v).strip())
+    except Exception:
+        return None
 
 @dataclass
 class Song:
@@ -688,7 +710,8 @@ async def fetch_battle_top_winner(session: aiohttp.ClientSession, battle_id: int
         return None
     r = rows[0]
     r["_score_str"] = f"{int(r.get('score', 0)):,.0f}" if isinstance(r.get('score'), (int, float)) else "?"
-    r["_name"] = str(r.get("name", "Unknown"))
+    # strip platform/fluff tags like [360] [PS3] [RPCS3] [WII] from display
+    r["_name"] = _strip_platform_tags(str(r.get("name", "Unknown")))
     return r
 
 async def fetch_battles(session: aiohttp.ClientSession) -> Optional[List[dict]]:
@@ -748,6 +771,9 @@ def _read_manager_state() -> dict:
     st.setdefault(OVERTAKES_KEY, {})
     st.setdefault("last_week_increment_at", None)
     st.setdefault(LINKS_KEY, {})  # NEW: { "<discord_user_id>": [display_name, ...] }
+    st.setdefault(CHAMPION_GRANTS_KEY, [])
+    if not isinstance(st[CHAMPION_GRANTS_KEY], list):
+        st[CHAMPION_GRANTS_KEY] = []
 
     # --- Normalize LIVE overtake map (more permissive: trims strings) ---
     live = {}
@@ -848,6 +874,102 @@ class WeeklyBattleManager:
         self.lock = asyncio.Lock()
         self.task = asyncio.create_task(self._loop())
         self.results_task = asyncio.create_task(self._watch_expirations())
+        self.role_task = asyncio.create_task(self._watch_role_grants())
+
+    async def _get_guild(self) -> Optional[discord.Guild]:
+        gid = getattr(self.bot, "dev_guild_id", None)
+        if not gid:
+            return None
+        g = self.bot.get_guild(gid)
+        if g is None:
+            try:
+                g = await self.bot.fetch_guild(gid)
+            except Exception:
+                return None
+        return g
+
+    async def _grant_champion_role(self, discord_user_id: int, battle_id: int, leader_name: str) -> bool:
+        g = await self._get_guild()
+        if not g:
+            return False
+        role = g.get_role(CHAMPION_ROLE_ID)
+        # Idempotency: if an active grant already exists for this user/battle, don't re-add
+        async with self.lock:
+            for g in self.state.setdefault(CHAMPION_GRANTS_KEY, []):
+                if int(g.get("user_id", 0)) == int(discord_user_id) and int(g.get("battle_id", 0)) == int(battle_id) and g.get("active"):
+                    return True
+        if not role:
+            return False
+        try:
+            member = await g.fetch_member(discord_user_id)
+        except Exception:
+            return False
+        try:
+            await member.add_roles(role, reason=f"Score Snipe champion for battle {battle_id} ({leader_name})")
+        except Exception:
+            return False
+        rec = {
+            "user_id": int(discord_user_id),
+            "role_id": int(CHAMPION_ROLE_ID),
+            "battle_id": int(battle_id),
+            "granted_at": _to_iso(_utcnow()),
+            "expires_at": _to_iso(_utcnow() + timedelta(days=7)),
+            "removed_at": None,
+            "active": True,
+        }
+        async with self.lock:
+            grants = self.state.setdefault(CHAMPION_GRANTS_KEY, [])
+            grants.append(rec)
+            _write_manager_state(self.state)
+        return True
+
+    async def _remove_champion_role_now(self, discord_user_id: int) -> bool:
+        g = await self._get_guild()
+        if not g:
+            return False
+        role = g.get_role(CHAMPION_ROLE_ID)
+        if not role:
+            return False
+        try:
+            member = await g.fetch_member(discord_user_id)
+        except Exception:
+            return False
+        try:
+            await member.remove_roles(role, reason="Score Snipe champion role expired")
+        except Exception:
+            return False
+        return True
+
+    async def _watch_role_grants(self):
+        await self.bot.wait_until_ready()
+        while True:
+            try:
+                now = _utcnow()
+                to_update: list[dict] = []
+                # snapshot first (avoid holding the lock during network calls)
+                async with self.lock:
+                    grants = list(self.state.get(CHAMPION_GRANTS_KEY, []))
+                for rec in grants:
+                    if not rec.get("active"):
+                        continue
+                    exp = _from_iso(rec.get("expires_at"))
+                    if exp and exp <= now:
+                        to_update.append(rec)
+                # process expirations
+                for rec in to_update:
+                    uid = int(rec.get("user_id"))
+                    ok = await self._remove_champion_role_now(uid)
+                    async with self.lock:
+                        # mark inactive whether or not removal succeeded (it will retry next boot if still on member)
+                        rec["active"] = False
+                        rec["removed_at"] = _to_iso(_utcnow())
+                        # write back the mutated object (same identity)
+                        _write_manager_state(self.state)
+            except Exception as e:
+                async with self.lock:
+                    self.state["last_error"] = f"champ role watcher: {e!r}"
+                    _write_manager_state(self.state)
+            await asyncio.sleep(60)
 
     def _pending_unannounced(self) -> list[dict]:
         now = _utcnow()
@@ -940,6 +1062,7 @@ class WeeklyBattleManager:
     async def _announce_winners(self, finished_recs: list[dict]):
         if not finished_recs:
             return
+
         chan_id = getattr(self.bot, "announce_channel_id", None)
         role_id = getattr(self.bot, "ping_role_id", None)
         if not chan_id:
@@ -950,36 +1073,187 @@ class WeeklyBattleManager:
 
         channel = self.bot.get_channel(chan_id) or await self.bot.fetch_channel(chan_id)
 
-        winners: list[tuple[dict, Optional[dict]]] = []
-        band_groups: dict[int, dict] = {}  # battle_id -> {'score': int, 'names': [...], '_score_str': str}
+        # --- Single-winner fancy embed ---
+        if len(finished_recs) == 1:
+            rec = finished_recs[0]
+            bid = int(rec["battle_id"])
 
+            # Normalize instrument
+            instr_key = rec.get("instrument")
+            if isinstance(instr_key, int):
+                instr_key = INSTR_BY_ROLE_ID.get(instr_key)
+            elif isinstance(instr_key, str) and instr_key.isdigit():
+                instr_key = INSTR_BY_ROLE_ID.get(int(instr_key))
+            is_band = (instr_key == "band")
+            instr_name = INSTR_DISPLAY_NAMES.get(instr_key or "", (instr_key or "Instrument").capitalize())
+            emoji = INSTR_EMOJI.get(instr_key or "", "🎵")
+
+            # fetch more rows for band
+            pg_n = BAND_TOP_N if is_band else 5
+            rows = await fetch_battle_leaderboard(self.bot.http_session, bid, page_size=pg_n) or []
+            top = rows[0] if rows else None
+
+            # Determine champion name(s)
+            champ_names: list[str] = []
+            if rows:
+                top_score = rows[0].get("score")
+                champ_names: list[str] = []
+                if rows:
+                    top_score = rows[0].get("score")
+                    # collect all tied-at-top names, strip platform tags, keep order & de-dupe after stripping
+                    seen = set()
+                    for r in rows:
+                        if r.get("score") == top_score:
+                            dn = _strip_platform_tags(str(r.get("name", "Unknown")))
+                            if dn and dn not in seen:
+                                seen.add(dn)
+                                champ_names.append(dn)
+
+            # --- Header line ---
+            if not champ_names:
+                champ_header = "### 🏆 No entries" if is_band else "# 🏆 No entries"
+            elif is_band:
+                # band: never truncate; smaller heading
+                champ_header = "### 🏆 " + ", ".join(champ_names)
+            elif len(champ_names) == 1:
+                champ_header = f"# 🏆 {champ_names[0]}"
+            else:
+                more = "…" if len(champ_names) > 3 else ""
+                champ_header = "# 🏆 " + ", ".join(champ_names) + " — Co-champions!"
+
+            # Table (band gets 15)
+            table = format_battle_rows(rows or [], max_n=pg_n)
+
+            # Song details
+            song = self._song_from_id(int(rec["song_id"]))
+            song_title = song.name if song else f"Song ID {rec.get('song_id')}"
+            artist = (song.artist if song else None) or "—"
+            album_line = (song.album_name or "—") if song else "—"
+            if song and song.year:
+                album_line = f"{album_line} ({song.year})"
+            rank_val = _rank(song, instr_key) if (song and instr_key) else None
+            diff_txt = difficulty_label(_th_key(instr_key or ""), rank_val) if (instr_key) else "—"
+
+            # Overtakes
+            over_map: Dict[str, int] = self.state.get(OVERTAKES_KEY, {}) or {}
+            bkey = str(bid)
+            changes = int(over_map.get(bkey, 0) or 0)
+
+            # Table with runner-ups (top 5)
+            table = format_battle_rows(rows or [], max_n=pg_n)
+
+            # Time tags
+            def _to_unix(v) -> Optional[int]:
+                if isinstance(v, (int, float)):
+                    return int(v)
+                if isinstance(v, str):
+                    s = v.strip()
+                    if s.isdigit():
+                        return int(s)
+                    dt = _from_iso(s)
+                    return int(dt.timestamp()) if dt else None
+                return None
+
+            starts_ts = _to_unix(rec.get("created_at") or rec.get("starts_at"))
+            ends_ts   = _to_unix(rec.get("expires_at"))
+
+            # Description
+            parts = [
+                champ_header,
+                f"{emoji} **{instr_name}** — *{song_title}* by _{artist}_",
+            ]
+            parts.append(f"**Overtakes this week:** {changes}")
+            parts.append("")  # spacer
+            parts.append(table)
+
+            embed = discord.Embed(
+                title="Score Snipe — Champions!",
+                description="\n".join(parts),
+                color=0xFACC15,
+            )
+
+            # Thumbnail + info fields (like /battles)
+            if song:
+                thumb = await fetch_song_art_url(self.bot.http_session, song.slug)
+                embed.set_thumbnail(url=thumb)
+                embed.add_field(name="Artist", value=artist, inline=True)
+                embed.add_field(name="Album", value=album_line, inline=True)
+                embed.add_field(name="\u200B", value="\u200B", inline=True)
+                embed.add_field(name="Difficulty", value=diff_txt, inline=True)
+                embed.add_field(name="Instrument", value=instr_name, inline=True)
+                embed.add_field(name="\u200B", value="\u200B", inline=True)
+                details = f"{(song.genre or '—')} • {(song.source or '—')} • ID `{song.song_id}`"
+                embed.add_field(name="Details", value=details, inline=False)
+            else:
+                embed.add_field(name="Details", value=f"ID `{rec.get('song_id')}`", inline=False)
+
+            embed.add_field(name="Started", value=(f"<t:{starts_ts}:R>" if starts_ts else "—"), inline=True)
+            embed.add_field(name="Ended",   value=(f"<t:{ends_ts}:R>"   if ends_ts   else "—"), inline=True)
+
+            # Send
+            try:
+                await channel.send(
+                    content=(f"<@&{role_id}>" if role_id else None),
+                    embeds=[embed],
+                    allowed_mentions=discord.AllowedMentions(roles=True, users=False, everyone=False),
+                )
+            except Exception as e:
+                async with self.lock:
+                    self.state["last_error"] = f"results announce failed: {e!r}"
+                    _write_manager_state(self.state)
+                return
+
+            # Persist winner + freeze/clear overtake count
+            async with self.lock:
+                by_id = {r["battle_id"]: r for r in self.state.get("created_battles", [])}
+                if rec["battle_id"] in by_id:
+                    by_id[rec["battle_id"]]["winner"] = _winner_payload(top)
+                    by_id[rec["battle_id"]]["winner_announced"] = True
+                    by_id[rec["battle_id"]]["announced_at"] = _to_iso(_utcnow())
+                    by_id[rec["battle_id"]]["overtakes"] = int(over_map.get(bkey, 0) or 0)
+                over_map.pop(bkey, None)
+                self.state[OVERTAKES_KEY] = over_map
+                _write_manager_state(self.state)
+
+            # Champion role grant(s) if linked
+            if champ_names:
+                names_to_award = champ_names
+                for nm in names_to_award:
+                    uid = _link_owner_user_id(self.state, _norm_link_name(nm))
+                    if uid:
+                        try:
+                            await self._grant_champion_role(uid, bid, nm)
+                        except Exception:
+                            pass
+
+            return  # done
+
+        # --- Fallback: your existing multi-winner flow (unchanged, condensed) ---
+        winners: list[tuple[dict, Optional[dict]]] = []
+        band_groups: dict[int, dict] = {}
         for rec in finished_recs:
             bid = int(rec["battle_id"])
             instr = rec.get("instrument")
-            # recs we created store string keys; service payloads may store role_id
             if isinstance(instr, int):
                 instr_key = INSTR_BY_ROLE_ID.get(instr)
             elif isinstance(instr, str):
                 instr_key = instr
             else:
                 instr_key = None
-
             if instr_key == "band":
                 rows = await fetch_battle_leaderboard(self.bot.http_session, bid, page_size=TOP_N) or []
                 if rows:
                     top_score = rows[0].get("score")
                     grp = [r for r in rows if r.get("score") == top_score]
-                    names = [str(r.get("name","Unknown")) for r in grp]
+                    # clean display names for header/summary
+                    names = [_strip_platform_tags(str(r.get("name","Unknown"))) for r in grp]
                     try:
                         sc_str = f"{int(top_score):,}"
                     except Exception:
                         sc_str = "?"
                     band_groups[bid] = {"score": int(top_score) if isinstance(top_score,(int,float)) else None,
                                         "names": names, "_score_str": sc_str}
-                    # keep a single top row for generic fields if you want
-                    top = dict(rows[0])
-                    top["_score_str"] = sc_str
-                    top["_name"] = names[0] if names else "Unknown"
+                    top = dict(rows[0]); top["_score_str"] = sc_str; top["_name"] = names[0] if names else "Unknown"
                     winners.append((rec, top))
                 else:
                     winners.append((rec, None))
@@ -987,15 +1261,12 @@ class WeeklyBattleManager:
                 top = await fetch_battle_top_winner(self.bot.http_session, bid)
                 winners.append((rec, top))
 
-        # Title + header
         weeks = {rec.get("week") for rec, _ in winners if rec.get("week")}
         title = f"Score Snipe Week {list(weeks)[0]} — Winners Circle" if len(weeks) == 1 else "Score Snipe — Winners Circle"
         SPACER = "\u200B"
         num_champs = sum(1 for _, w in winners if w)
-        lead = "No champions crowned" if num_champs == 0 else f"{num_champs} champion{'s' if num_champs != 1 else ''} crowned"
-
         over_map: Dict[str, int] = self.state.get(OVERTAKES_KEY, {}) or {}
-        lines: list[str] = [f"{lead} Congratulations! Use `/battles` to view full tables.", SPACER]
+        lines: list[str] = [("No champions crowned" if num_champs == 0 else f"{num_champs} champion{'s' if num_champs != 1 else ''} crowned") + " Congratulations! Use `/battles` to view full tables.", SPACER]
 
         for rec, w in winners:
             song = self._song_from_id(int(rec["song_id"]))
@@ -1004,19 +1275,14 @@ class WeeklyBattleManager:
                 instr_key = INSTR_BY_ROLE_ID.get(instr_key)
             instr_name = INSTR_DISPLAY_NAMES.get(instr_key, (instr_key or "").capitalize())
             emoji = INSTR_EMOJI.get(instr_key, "🎵")
-
             song_part = song.name if song else f"ID {rec.get('song_id')}"
             artist_part = f" by _{song.artist}_" if song and song.artist else ""
-
             bkey = str(rec["battle_id"])
             changes = int(over_map.get(bkey, 0) or 0)
-
-            # Winner line: band shows score group; others show player
             if instr_key == "band":
                 info = band_groups.get(int(rec["battle_id"])) if w else None
                 if info and info.get("score") is not None:
-                    names = info["names"]
-                    sc_str = info["_score_str"]
+                    names = info["names"]; sc_str = info["_score_str"]
                     if len(names) == 1:
                         winner_line = f"🏆 **{names[0]}** — **{sc_str}**"
                     elif len(names) <= 4:
@@ -1028,27 +1294,18 @@ class WeeklyBattleManager:
                     winner_line = "🚫 *No entries*"
             else:
                 winner_line = f"🏆 **{w['_name']}** — **{w['_score_str']}**" if w else "🚫 *No entries*"
-
             if w and changes:
-                plural = "" if changes == 1 else "s"
-                winner_line += f" • **{changes}** overtake{plural}"
-
+                winner_line += f" • **{changes}** overtake{'s' if changes != 1 else ''}"
             lines.append(f"{emoji} **{instr_name}** — *{song_part}*{artist_part}")
             lines.append(" " + winner_line)
             lines.append(SPACER)
 
-        # Next week's time hint (unchanged)
         nxt = _from_iso(self.state.get("next_run_at"))
         if nxt and nxt > _utcnow():
             ts = int(nxt.timestamp())
             lines.append(f"*Next Week's Score Snipe begins <t:{ts}:R> — <t:{ts}:t>*")
 
-        embed = discord.Embed(
-            title=title,
-            description="\n".join(lines),
-            color=0xFACC15,
-        )
-
+        embed = discord.Embed(title=title, description="\n".join(lines), color=0xFACC15)
         try:
             await channel.send(
                 content=(f"<@&{role_id}>" if role_id else None),
@@ -1061,7 +1318,7 @@ class WeeklyBattleManager:
                 _write_manager_state(self.state)
             return
 
-        # Persist winners + freeze/clear overtake counts
+        # Persist + clear overtake counts for multi-winner fallback
         async with self.lock:
             by_id = {r["battle_id"]: r for r in self.state.get("created_battles", [])}
             for rec, w in winners:
@@ -1073,7 +1330,6 @@ class WeeklyBattleManager:
                     by_id[rid]["announced_at"] = _to_iso(_utcnow())
                     by_id[rid]["overtakes"] = int(over_map.get(bkey, 0) or 0)
                 over_map.pop(bkey, None)
-
             self.state[OVERTAKES_KEY] = over_map
             _write_manager_state(self.state)
 
@@ -1641,7 +1897,12 @@ class SubscriptionManager:
         role_val = battle.get("instrument")
         role_id = int(role_val) if isinstance(role_val, (int, float)) else (int(role_val) if isinstance(role_val, str) and role_val.isdigit() else None)
         instr_key = INSTR_BY_ROLE_ID.get(role_id) if role_id is not None else None
-        instr_name = INSTR_DISPLAY_NAMES.get(instr_key, (instr_key or "Instrument").capitalize())
+
+        limit = BAND_TOP_N if instr_key == "band" else TOP_N
+
+        # Table + header lines
+        desc = format_battle_rows(rows or [], max_n=limit)
+        title = f"🥇 Overtake Alert — {battle.get('title','(untitled)')}"
 
         # If it's a band battle and there's a tie for top score, list the names.
         if instr_key == "band" and new_top:
@@ -1982,9 +2243,14 @@ class BattleListView(discord.ui.View):
             bid = battle.get("battle_id")
             if not isinstance(bid, int):
                 return
+            # detect band
+            role_val = battle.get("instrument")
+            role_id = int(role_val) if isinstance(role_val, (int, float)) else (int(role_val) if isinstance(role_val, str) and role_val.isdigit() else None)
+            instr_key = INSTR_BY_ROLE_ID.get(role_id) if role_id is not None else None
+            size = BAND_TOP_N if instr_key == "band" else TOP_N
             async with sem:
                 if bid not in self.leaderboards:
-                    rows = await fetch_battle_leaderboard(bot.http_session, bid, page_size=TOP_N)
+                    rows = await fetch_battle_leaderboard(bot.http_session, bid, page_size=size)
                     if rows:
                         self.leaderboards[bid] = rows
             # also warm the thumbnail cache (non-blocking verification)
@@ -2075,7 +2341,13 @@ class BattleListView(discord.ui.View):
         # Resolve song (and thumbnail)
         sid = self._extract_song_id(battle)
         song = bot.song_index.by_id.get(sid) if (sid and bot.song_index) else None  # type: ignore
-        desc_table = format_battle_rows(lb or [], max_n=TOP_N)
+        # detect band
+        role_val = battle.get("instrument")
+        role_id = int(role_val) if isinstance(role_val, (int, float)) else (int(role_val) if isinstance(role_val, str) and role_val.isdigit() else None)
+        instr_key = INSTR_BY_ROLE_ID.get(role_id) if role_id is not None else None
+        max_n = BAND_TOP_N if instr_key == "band" else TOP_N
+
+        desc_table = format_battle_rows(lb or [], max_n=max_n)
 
         parts = []
         if song:
@@ -2937,9 +3209,9 @@ async def unlink_cmd(interaction: discord.Interaction, name: str):
     app_commands.Choice(name="Disable",             value="disable"),
     app_commands.Choice(name="Status",              value="status"),
     app_commands.Choice(name="Run now",             value="run"),
-    app_commands.Choice(name="Post TEST winners",   value="test"),
     app_commands.Choice(name="Create battle",       value="create"),
     app_commands.Choice(name="Delete battle",       value="delete"),
+    app_commands.Choice(name="Test expired winners", value="test_expired"),
 ])
 @app_commands.describe(
     action="What to do",
@@ -2957,7 +3229,8 @@ async def unlink_cmd(interaction: discord.Interaction, name: str):
     description="(Create only) Battle description",
 
     # Delete battle
-    battle_id="(Delete only) Numeric battle ID"
+    battle_id="(Delete only) Numeric battle ID",
+    window_hours="(Test-expired) Look back this many hours when auto-selecting (default 48)"
 )
 @is_admin()
 async def z_admin_auto(
@@ -2970,6 +3243,7 @@ async def z_admin_auto(
     title: Optional[str] = None,
     description: Optional[str] = None,
     battle_id: Optional[int] = None,
+    window_hours: Optional[int] = 72,
 ):
     await interaction.response.defer(ephemeral=True, thinking=True)
 
@@ -3034,86 +3308,104 @@ async def z_admin_auto(
         await interaction.followup.send("\n".join(lines), ephemeral=True)
         return
 
-    # ------------- TEST WINNERS -------------
-    if act == "test":
-        if not bot.http_session or not bot.song_index:
-            await interaction.followup.send("HTTP session / song index not ready.", ephemeral=True)
+    # ------------- TEST EXPIRED WINNERS (iterate ALL) -------------
+    if act == "test_expired":
+        if not bot.http_session or not bot.manager:
+            await interaction.followup.send("HTTP session / manager not ready.", ephemeral=True)
             return
 
-        eligible = bot.manager._eligible_songs()
-        if len(eligible) < 6:
-            await interaction.followup.send("Not enough eligible songs to run the test (need 6).", ephemeral=True)
+        # helpers
+        def _as_int(v):
+            try:
+                return int(str(v).strip())
+            except Exception:
+                return None
+
+        def _extract_song_id(b: dict) -> Optional[int]:
+            sid = None
+            if isinstance(b.get("song_ids"), list) and b["song_ids"]:
+                sid = b["song_ids"][0]
+            elif isinstance(b.get("song_id"), (int, str)):
+                sid = b["song_id"]
+            elif isinstance(b.get("description"), str):
+                m = re.search(r"\bID\s*(\d{4,9})\b", b["description"])
+                if m:
+                    sid = m.group(1)
+            try:
+                return int(sid) if sid is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        battles = await fetch_battles(bot.http_session)
+        if not battles:
+            await interaction.followup.send("No battles returned by API.", ephemeral=True)
             return
 
-        if len(eligible) < 6:
-            await interaction.followup.send("Not enough eligible songs to run the test (need 6).", ephemeral=True)
+        now = _utcnow()
+        lookback = now - timedelta(hours=int(window_hours or 72))
+
+        # collect ALL expired (optionally within window)
+        expired: list[dict] = []
+        for b in battles:
+            dt = _as_dt(b.get("expires_at"))       # accepts epoch ints/strings or ISO
+            if not dt or dt > now:
+                continue
+            if window_hours is not None and dt < lookback:
+                continue
+            expired.append(b)
+
+        if not expired:
+            txt = "No expired battles found"
+            if window_hours:
+                txt += f" within last {int(window_hours)}h"
+            await interaction.followup.send(txt + ".", ephemeral=True)
             return
 
-        instrs = INSTR_SET_WEEK[:] + [random.choice(PRO_ONE_PER_WEEK)]  # 6 instruments total
-        songs = random.sample(eligible, len(instrs))  # pick exactly as many songs as instruments
+        # oldest → newest to keep output tidy
+        expired.sort(key=lambda x: (_as_dt(x.get("expires_at")) or now))
 
-        winners: list[tuple[Song, str, Optional[dict]]] = []
-        for song_obj, instr_key in zip(songs, instrs):
-            rid = INSTR_ROLE_IDS[instr_key]
-            rows = await fetch_leaderboards(bot.http_session, song_obj.song_id, rid)
-            top = rows[0] if rows else None
+        # Respect the 'ping' flag without touching _announce_winners()
+        original_ping_role_id = getattr(bot, "ping_role_id", None)
+        if not ping:
+            bot.ping_role_id = None
 
-            if top:
-                score = top.get("score")
-                top["_score_str"] = f"{int(score):,}" if isinstance(score, (int, float)) else "?"
-                top["_name"] = str(top.get("name", "Unknown"))
-
-            winners.append((song_obj, instr_key, top))
-
-        week = bot.manager.state.get("week")
-        week_txt = str(int(week)) if isinstance(week, int) and week > 0 else "?"
-
-        SPACER = "\u200B"
-        num_champs = sum(1 for _, _, top in winners if top)
-        lead = "No champs crowned" if num_champs == 0 else f"{num_champs} champ{'s' if num_champs != 1 else ''} crowned"
-
-        lines: list[str] = [f"{lead}—ggs everyone! Use `/battles` to view full tables.", SPACER]
-        for song_obj, instr_key, top in winners:
-            emoji = INSTR_EMOJI.get(instr_key, "🎵")
-            instr_name = INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())
-            header = f"{emoji} **{instr_name}** — *{song_obj.name}* by _{song_obj.artist}_"
-            trophy = (
-                f"🏆 **{top['_name']}** — **{top['_score_str']}**"
-                if top else "🚫 *No entries*"
-            )
-            lines.append(header)
-            lines.append(" " + trophy)
-            lines.append(SPACER)
-
-        nxt = _from_iso(bot.manager.state.get("next_run_at")) if bot.manager else None
-        if not nxt or nxt <= _utcnow():
-            nxt = _utcnow() + timedelta(seconds=NEXT_WEEK_GAP_SECONDS)
-        ts = int(nxt.timestamp())
-        lines.append(f"*Next Week's Score Snipe begins <t:{ts}:R> — <t:{ts}:t>*")
-
-        embed = discord.Embed(
-            title=f"Score Snipe Week {week_txt} — Winners Circle",
-            description="\n".join(lines),
-            color=0xFACC15,
-        )
-
-        chan_id = getattr(bot, "announce_channel_id", None)
-        role_id = getattr(bot, "ping_role_id", None)
-        if not chan_id:
-            await interaction.followup.send("announce_channel_id not configured.", ephemeral=True)
-            return
+        posted_ids: list[str] = []
 
         try:
-            channel = bot.get_channel(chan_id) or await bot.fetch_channel(chan_id)
-            await channel.send(
-                content=(f"<@&{role_id}>" if (ping and role_id) else None),
-                embeds=[embed],
-                allowed_mentions=discord.AllowedMentions(roles=True, users=False, everyone=False),
-            )
-            await interaction.followup.send("Posted TEST Winners Circle embed.", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"Failed to post: {e!r}", ephemeral=True)
+            for b in expired:
+                bid = _as_int(b.get("battle_id"))
+                if bid is None:
+                    continue
+
+                rec = {
+                    "battle_id": bid,
+                    "song_id": _extract_song_id(b) or b.get("song_id"),
+                    "instrument": b.get("instrument"),
+                    "created_at": b.get("starts_at") or b.get("created_at"),
+                    "expires_at": b.get("expires_at"),
+                    "title": b.get("title"),
+                    "week": bot.manager.state.get("week") or 0,
+                    "winner_announced": False,
+                    "winner": None,
+                    "overtakes": bot.manager.state.get(OVERTAKES_KEY, {}).get(str(bid), 0),
+                }
+
+                await bot.manager._announce_winners([rec])
+                posted_ids.append(str(bid))
+
+                # be gentle with rate limits
+                await asyncio.sleep(0.7)
+        finally:
+            # restore ping role setting
+            bot.ping_role_id = original_ping_role_id
+
+        await interaction.followup.send(
+            f"Posted winners for **{len(posted_ids)}** expired battle(s): "
+            + (", ".join(posted_ids) if posted_ids else "—"),
+            ephemeral=True
+        )
         return
+
 
     # ---------------- CREATE ----------------
     if act == "create":
