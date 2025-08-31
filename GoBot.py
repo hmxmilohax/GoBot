@@ -3088,6 +3088,7 @@ async def info_cmd(interaction: discord.Interaction):
         "In game, go to `Quickplay > Setlists / Battles` to find the battle.",
         "Playing the song by itself in normal quickplay will **not** count toward the battle.",
         "Use `/leaderboards` anytime to check global standings.",
+        "Check out <https://rbpaths.github.io/> for pathing!",
     ]
 
     # NEW: linking section
