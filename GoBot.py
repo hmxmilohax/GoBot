@@ -3068,17 +3068,17 @@ async def info_cmd(interaction: discord.Interaction):
     what_i_do = [
         "`/battles` — browse active battles, and subscribe for notifications",
         "`/leaderboards <song> [instrument]` — view a song’s top scores",
-        "`/link <leaderboard name>` — link your Discord to your in-game leaderboard name (tags like [RPCS3]/[Xenia] are ignored)",
+        "`/link <leaderboard name>` — link your Discord to your in-game leaderboard name",
         "`/unlink <leaderboard name>` — remove a linked name",
         "`/info` — print this info",
     ]
 
     # daily format (kept)
     weekly_core = "Mon–Sat, not Wed: one battle daily cycling **Guitar, Bass, Drums, Vocals, Band** (no repeats until all used)"
-    weekly_pro  = "Wed & Sun: one **random Pro** battle each day (Pro Guitar/Pro Bass/Pro Keys), cycling without repeats"
+    weekly_pro  = "Wed & Sun: one **random Pro** battle each day **(Pro Guitar/Pro Bass/Bro Drums/Harmonies/Pro Keys)**, cycling without repeats"
 
     rules = [
-        "Official content + Rock Band Network only for now",
+        "**Official content + Rock Band Network** only for now",
         "No **Festival** or **Beatles** songs. RB4 is allowed",
         "No **2x bass pedal** versions",
     ]
@@ -3086,16 +3086,16 @@ async def info_cmd(interaction: discord.Interaction):
     quick_start = [
         "Open `/battles`, pick a card, play the chart, post your best.",
         "In game, go to `Quickplay > Setlists / Battles` to find the battle.",
-        "Playing the song by itself in normal quickplay will **not** count toward the battle.",
+        "Playing the song by itself in normal quickplay will **NOT** count toward the battle.",
         "Use `/leaderboards` anytime to check global standings.",
         "Check out <https://rbpaths.github.io/> for pathing!",
     ]
 
     # NEW: linking section
     linking = [
-        "Use `/link <leaderboard name>` to associate your Discord with your GoCentral leaderboard name.",
-        "Platform tags like `[RPCS3]`, `[Xenia]`, etc. are ignored — just use the name as shown.",
-        "You can link **multiple names** (e.g., alts). Use `/unlink` to remove one later.",
+        "Use `/link <GoCentral Gamertag>` to associate your Discord with your GoCentral leaderboard name.",
+        "Platform tags like `[RPCS3]`, `[360]`, etc. are ignored — just type your gamertag exactly as shown.",
+        "You can link **multiple names**. Use `/unlink` to remove linked gamertags.",
     ]
 
     desc = []
