@@ -2270,14 +2270,22 @@ class BattleListView(discord.ui.View):
         self.add_item(BattlePrevButton(disabled=(self.page <= 0)))
         self.add_item(PageIndicator(label=f"{self.page + 1}/{total_pages}"))
         self.add_item(BattleNextButton(disabled=(self.page >= total_pages - 1)))
-        # NEW: toggle sub button
+
+        #subscribe only for active battles, else show "Expired" chip
         if self.show_subscribe and self.battles:
             battle = self.battles[self.page]
-            bid = battle.get("battle_id")
-            bkey = str(bid)
-            subs = (bot.manager.state.get(SUBS_KEY, {}) if bot.manager else {})
-            is_subbed = self.user.id in set(subs.get(bkey, [])) if self.user else False
-            self.add_item(SubscribeToggleButton(is_subbed))
+            ends_ts = self._to_unix(battle.get("expires_at"))
+            now_ts = int(_utcnow().timestamp())
+            is_expired = (ends_ts is not None) and (ends_ts <= now_ts)
+
+            if is_expired:
+                self.add_item(ExpiredIndicator())
+            else:
+                bid = battle.get("battle_id")
+                bkey = str(bid)
+                subs = (bot.manager.state.get(SUBS_KEY, {}) if bot.manager else {})
+                is_subbed = self.user.id in set(subs.get(bkey, [])) if self.user else False
+                self.add_item(SubscribeToggleButton(is_subbed))
 
     def _to_unix(self, v) -> Optional[int]:
         # Accept int/float epochs, digit-strings, or ISO8601 strings
@@ -2557,6 +2565,10 @@ class FindPlayerButton(discord.ui.Button):
             )
             return
         await interaction.response.send_modal(FindPlayerModal(view))
+
+class ExpiredIndicator(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Expired", style=discord.ButtonStyle.secondary, disabled=True)
 
 class SubscribeToggleButton(discord.ui.Button):
     def __init__(self, is_subscribed: bool):
@@ -2887,6 +2899,15 @@ async def battles_cmd(interaction: discord.Interaction, song: Optional[str] = No
     if not battles:
         await interaction.followup.send("No active battles found.")
         return
+
+    now = _utcnow()
+    def _is_expired(b: dict) -> bool:
+        dt = _as_dt(b.get("expires_at"))  # accepts epoch/ISO
+        return bool(dt and dt <= now)
+
+    active = [b for b in battles if not _is_expired(b)]
+    expired = [b for b in battles if _is_expired(b)]
+    battles = active + expired
 
     view = BattleListView(battles, interaction.user, show_subscribe=True)
 
