@@ -17,6 +17,7 @@ from discord.errors import Forbidden
 from datetime import datetime, timedelta, timezone
 import math
 from collections import defaultdict, Counter
+from zoneinfo import ZoneInfo
 
 GITHUB_IMG_BASE = "https://raw.githubusercontent.com/hmxmilohax/GoBot/main/images"
 DEFAULT_SONG_ART = f"{GITHUB_IMG_BASE}/_default.png"
@@ -53,6 +54,302 @@ NEXT_WEEK_GAP_SECONDS = 3600         # <-- wait 1 hour before next week's post
 STOPWORDS = {
     "the","and","a","of","to","in","on","for","feat","ft","vs","with","&"
 }
+
+# --- Locale (subset used by the vote UI) ---
+LOCALE = {
+    "dx_play_a_show": "Play a Show",
+    "dx_play_a_show_info": "Vote on which songs to play!\nVoting ends when all players have voted!",
+    "play_a_show_bandvote": "Band Vote:",
+    "play_a_show_genre": "A %s song",
+    "play_a_show_year": "A song from %i",
+    "play_a_show_year_decade": "A song from the %is",
+    "play_a_show_album": "A song from %s",  # (ignoring <alt> artist </alt> in Discord)
+    "play_a_show_artist": "A song by %s",
+    "play_a_show_diff": "A %s song on %s",
+    "play_a_show_diff_an": "An %s song on %s",
+    "play_a_show_fast": "A fast song",
+    "play_a_show_med": "A completely random song",
+    "play_a_show_slow": "A slow song",
+    "play_a_show_long": "A long song",
+    "play_a_show_really_long": "A REALLY long song",
+    "play_a_show_short": "A short song",
+    "play_a_show_really_short": "A REALLY short song",
+    "play_a_show_source": "A song from %s",
+    "play_a_show_author": "A song charted by %s",
+    "play_a_show_missing_inst": "this song is missing one of your instruments",
+}
+
+LOCALE_SOURCES = {
+    # Official Sources — Beta
+    "gh1_beta": "Guitar Hero Beta",
+    "gh2_beta": "Guitar Hero II Beta",
+    "gh80s_beta": "Guitar Hero Encore: Rocks the 80s Beta",
+    "gh3_beta": "Guitar Hero III: Legends of Rock Beta",
+    "gh5_beta": "Guitar Hero 5 Beta",
+    "djhero_beta": "DJ Hero Beta",
+    "gh6_beta": "Guitar Hero 6",
+    "djhero2_beta": "DJ Hero 2 Beta",
+    "rb1_beta": "Rock Band 1 Beta",
+    "rb2_beta": "Rock Band 2 Beta",
+    "rb3_beta": "Rock Band 3 Beta",
+
+    # Guitar Hero games
+    "gh1": "Guitar Hero",
+    "gh2": "Guitar Hero II",
+    "gh2dlc": "Guitar Hero II DLC",
+    "gh80s": "Guitar Hero Encore: Rocks the 80s",
+    "gh3": "Guitar Hero III: Legends of Rock",
+    "gh3dlc": "Guitar Hero III DLC",
+    "ghot": "Guitar Hero: On Tour",
+    "gha": "Guitar Hero: Aerosmith",
+    "ghwt": "Guitar Hero: World Tour",
+    "ghwtdlc": "Guitar Hero: World Tour DLC",
+    "ghotd": "Guitar Hero On Tour: Decades",
+    "ghm": "Guitar Hero: Metallica",
+    "ghmdlc": "Death Magnetic DLC",
+    "ghsh": "Guitar Hero: Smash Hits",
+    "gh5": "Guitar Hero 5",
+    "gh5dlc": "Guitar Hero 5 DLC",
+    "djhero": "DJ Hero",
+    "djherodlc": "DJ Hero DLC",
+    "bh": "Band Hero",
+    "bh2": "Band Hero 2",
+    "bhds": "Band Hero DS",
+    "ghvh": "Guitar Hero: Van Halen",
+    "ghotmh": "Guitar Hero On Tour: Modern Hits",
+    "ghwor": "Guitar Hero: Warriors of Rock",
+    "ghwordlc": "Guitar Hero: Warriors of Rock DLC",
+    "djhero2": "DJ Hero 2",
+    "djhero2dlc": "DJ Hero 2 DLC",
+    "ghl": "Guitar Hero Live",
+    "ghtv": "Guitar Hero TV",
+    "gh": "Guitar Hero Series",
+    "ghdlc": "Guitar Hero Series DLC",
+
+    # Harmonix games
+    "acs": "A City Sleeps",
+    "amp03": "Amplitude (2003)",
+    "amp16": "Amplitude (2016)",
+    "antigrav": "EyeToy: Antigrav",
+    "audica": "Audica",
+    "flux": "Fantasia",
+    "fnfestival": "Fortnite Festival",
+    "freq": "Frequency",
+    "ham1": "Dance Central",
+    "ham2": "Dance Central 2",
+    "ham3": "Dance Central 3",
+    "kr_cmt": "CMT Presents: Karaoke Revolution Country",
+    "kr_party": "Karaoke Revolution Party",
+    "kr_vol_1": "Karaoke Revolution (2003)",
+    "kr_vol_2": "Karaoke Revolution Vol. 2",
+    "kr_vol_3": "Karaoke Revolution Vol. 3",
+    "kr": "Karaoke Revolution Series",
+    "viper": "Dance Central Spotlight",
+
+    # Rock Band games
+    "dlc": "Rock Band 1/2 DLC",
+    "rb1": "Rock Band 1",
+    "rb2": "Rock Band 2",
+    "rb3": "Rock Band 3",
+    "lego": "LEGO: Rock Band",
+    "greenday": "Green Day Rock Band",
+    "greendaydlc": "Green Day Rock Band DLC",
+    "rb1_dlc": "Rock Band 1/2 DLC",   # must exist for Play a Show
+    "ugc1": "Rock Band Network 1.0",
+    "rbtp_vol_1": "Track Pack Vol. 1",
+    "rbtp_acdc": "AC/DC Live Track Pack",
+    "rbtp_vol_2": "Track Pack Vol. 2",
+    "rbtp_classic_rock": "Classic Rock Track Pack",
+    "rbtp_country_1": "Country Track Pack",
+    "beatles": "The Beatles: Rock Band",
+    "beatles_dlc": "The Beatles: Rock Band DLC",
+    "rbtp_metal": "Metal Track Pack",
+    "rb3dlc": "Rock Band 3 DLC",
+    "rbtp_country_2": "Country Track Pack 2",
+    "ugc2": "Rock Band Network 2.0",
+    "blitz": "Rock Band Blitz",
+    "pearljam": "Pearl Jam: Rock Band",
+    "rbjapan": "Rock Band Japan",
+    "rb4": "Rock Band 4",
+    "rb4dlc": "Rock Band 4 DLC",
+    "rb4_dlc": "Rock Band 4 DLC",
+    "rbvr": "Rock Band VR",
+    "rb4_rivals": "Rock Band Rivals",
+    "lost_dlc": "Lost Rock Band DLC",
+
+    # Third-Party games
+    "gd": "GITADORA",
+    "gf1": "GuitarFreaks",
+    "gf2dm1": "GuitarFreaks 2ndMIX & DrumMania",
+    "pg": "PowerGig: Rise of the SixString",
+    "pgdlc": "PowerGig: Rise of the SixString DLC",
+    "rr": "Rock Revolution",
+    "rrdlc": "Rock Revolution DLC",
+
+    # Unofficial Sources — Charters
+    "ataeaf": "ataeaf's Charts",
+    "ganso": "Ganso's Charts",
+    "goulart": "raphaelgoulart's Charts",
+    "iasg14": "IaSg14's Charts",
+    "linosrb": "Linos' Charts",
+    "onyxite": "Onyxite Charts",
+    "pistolofrb6": "PistolOfRB6's Charts",
+    "plumato": "Plumato's Charts",
+    "ruggy": "Ruggy's Customs",
+    "sog": "SomeOldGuys' Charts",
+    "sygenysis": "Sygenysis' Charts",
+    "ted": "thardwardy's Charts",
+    "3rs": "ThreeAreEss' Charts",
+
+    # Community sources
+    "a7xmegapack": "Avenged Sevenfold Mega Pack",
+    "customs": "Custom Songs",
+    "c3customs": "C3 Customs",
+    "c3legacy": "Legacy C3 Customs",
+    "euterpe": "Project Euterpe",
+    "finnish": "Suomibiisit",
+    "jrb": "J-Rock Band",
+    "lanebreakers": "Lane Breakers",
+    "lanebreakersbonus": "Lane Breakers Bonus",
+    "lanebreakersdlc": "Lane Breakers DLC",
+    "milohax": "MiloHax Customs",
+    "paramoremegapack": "Paramore Mega Pack",
+    "rbbr": "Rock Band Brasil",
+    "rbee": "Rock Band en Español",
+    "rbrc": "Rock Band Road Crew",
+    "tbrbcdlc": "The Beatles: Rock Band Custom DLC",
+    "ugc": "Custom Songs",
+    "ugc_c3": "C3 Customs",
+    "ugc_lost": "Lost Rock Band Network",
+    "ugc_plus": "Custom Songs",
+    "ugc_rv": "RhythmVerse Customs",
+
+    # Fan-Made games
+    "ch": "Clone Hero",
+    "fof": "Frets on Fire",
+    "fretsmasher": "Fret Smasher",
+    "phaseshift": "Phase Shift",
+    "yarg": "YARG",
+    "yargdlc": "YARG DLC",
+}
+
+# Human-readable names for genres (genre / subgenre)
+LOCALE_GENRES = {
+    # Core
+    "alternative": "Alternative",
+    "bluegrass": "Bluegrass",
+    "blues": "Blues",
+    "classic": "Classic",
+    "classical": "Classical",
+    "classicrock": "Classic Rock",
+    "country": "Country",
+    "disco": "Disco",
+    "emo": "Emo",
+    "experimental": "Experimental",
+    "fusion": "Fusion",
+    "glam": "Glam",
+    "hardrock": "Hard Rock",
+    "industrial": "Industrial",
+    "inspirational": "Inspirational",
+    "jazz": "Jazz",
+    "jrock": "J-Rock",
+    "latin": "Latin",
+    "metal": "Metal",
+    "novelty": "Novelty",
+    "numetal": "Nu-Metal",
+    "pop": "Pop",
+    "poprock": "Pop-Rock",
+    "prog": "Prog",
+    "progrock": "Prog Rock",
+    "psychadelic": "Psychedelic",
+    "punk": "Punk",
+    "rock": "Rock",
+    "rockabilly": "Rockabilly",
+    "rockandroll": "Rock 'n' Roll",
+    "southernrock": "Southern Rock",
+    "grunge": "Grunge",
+    "indierock": "Indie Rock",
+    "new_wave": "New Wave",
+    "reggaeska": "Reggae/Ska",
+    "rbsoulfunk": "R&B/Soul/Funk",
+    "hiphoprap": "Hip-Hop/Rap",
+    "hiphop": "Hip Hop",
+    "other": "Other",
+    "popdanceelectronic": "Pop/Dance/Electronic",
+    "urban": "Urban",
+    "world": "World",
+    "surfrock": "Surf Rock",
+    "trap": "Trap",
+
+    # Extended / BR set
+    "axebr": "Axé",
+    "bigband": "Big Band",
+    "blackmetal": "Black Metal",
+    "bossanova": "Bossa Nova",
+    "bregatechnobrega": "Brega/Techno Brega",
+    "forro": "Forró",
+    "funkbr": "Brazilian Funk",
+    "deathmetal": "Death Metal",
+    "dubstep": "Dubstep",
+    "funkmelody": "Funk Melody",
+    "gospel": "Gospel",
+    "hairmetal": "Hair Metal",
+    "hardcorepunk": "Hardcore Punk",
+    "metalcore": "Metalcore",
+    "mpb": "MPB",
+    "pagode": "Pagode",
+    "poppunk": "Pop Punk",
+    "posthardcore": "Post-Hardcore",
+    "psychobilly": "Psychobilly",
+    "raprock": "Rap-Rock",
+    "samba": "Samba",
+    "sertanejo": "Sertanejo",
+    "sertanejo_universitario": "Sertanejo Universitário",
+    "skapunk": "Ska Punk",
+    "speedmetal": "Speed Metal",
+
+    # Subgenre aliases
+    "subgenre_axebr": "Axé",
+    "subgenre_bossanova": "Bossa Nova",
+    "subgenre_brega": "Brega",
+    "subgenre_technobrega": "Techno Brega",
+    "subgenre_forro": "Forró",
+    "subgenre_funkbr": "Brazilian Funk",
+    "subgenre_funkmelody": "Funk Melody",
+    "subgenre_gospel": "Gospel",
+    "subgenre_mpb": "MPB",
+    "subgenre_pagode": "Pagode",
+    "subgenre_poprock": "Pop-Rock",
+    "subgenre_samba": "Samba",
+    "subgenre_sertanejo": "Sertanejo",
+    "subgenre_sertanejo_universitario": "Sertanejo Universitário",
+}
+
+# Merge into LOCALE with explicit prefixes for easy lookup/override
+LOCALE.update({f"source_{k}": v for k, v in LOCALE_SOURCES.items()})
+LOCALE.update({f"genre_{k}": v for k, v in LOCALE_GENRES.items()})
+
+def pretty_source(code: Optional[str]) -> str:
+    """Localized display for game_origin values."""
+    if not code:
+        return "—"
+    k = str(code).strip().lower()
+    return LOCALE.get(f"source_{k}", LOCALE_SOURCES.get(k, k.replace("_", " ").title()))
+
+def pretty_genre(code: Optional[str]) -> str:
+    """Localized display for genre / subgenre values."""
+    if not code:
+        return "—"
+    k = str(code).strip().lower()
+    return LOCALE.get(f"genre_{k}", LOCALE_GENRES.get(k, k.replace("_", " ").title()))
+
+def loc(key: str, *args):
+    s = LOCALE.get(key, key)
+    try:
+        return (s % args) if args else s
+    except Exception:
+        return s
+
 
 # Source policy
 EXCLUDED_SOURCES = {"fnfestival", "beatles"}
@@ -764,6 +1061,9 @@ def _read_manager_state() -> dict:
     st.setdefault("last_run_at", None)
     st.setdefault("last_error", None)
     st.setdefault("week", 0)
+    st.setdefault("vote_enabled", True)          # turn off to disable daily vote flow
+    st.setdefault("vote_next_start_at", None)    # ISO time for next noon start (UTC)
+    st.setdefault("daily_vote", None)            # active vote payload or None
     st.setdefault("daily_core_pool", [])  # rotates through INSTR_SET_WEEK (Mon–Fri)
     st.setdefault("daily_pro_pool", [])   # rotates through PRO_ONE_PER_WEEK (Sat–Sun)
     st.setdefault(SUBS_KEY, {})
@@ -1182,7 +1482,7 @@ class WeeklyBattleManager:
                 embed.add_field(name="Difficulty", value=diff_txt, inline=True)
                 embed.add_field(name="Instrument", value=instr_name, inline=True)
                 embed.add_field(name="\u200B", value="\u200B", inline=True)
-                details = f"{(song.genre or '—')} • {(song.source or '—')} • ID `{song.song_id}`"
+                details = f"{pretty_genre(song.genre)} • {pretty_source(song.source)} • ID `{song.song_id}`"
                 embed.add_field(name="Details", value=details, inline=False)
             else:
                 embed.add_field(name="Details", value=f"ID `{rec.get('song_id')}`", inline=False)
@@ -1564,7 +1864,7 @@ class WeeklyBattleManager:
                 e.add_field(name="\u200B", value="\u200B", inline=True)  # pad third column
 
                 # Row 3: Details (full width)
-                details = f"{(song.genre or '—')} • {(song.source or '—')} • ID `{song.song_id}`"
+                details = f"{pretty_genre(song.genre)} • {pretty_source(song.source)} • ID `{song.song_id}`"
                 e.add_field(name="Details", value=details, inline=False)
             else:
                 e.add_field(name="Details", value=f"ID `{r.get('song_id')}`", inline=False)
@@ -1705,6 +2005,471 @@ class WeeklyBattleManager:
                 "winner": None,
                 "overtakes": 0,
             }
+
+NUM_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+VOTE_CATEGORIES = ("year", "source", "song", "album", "artist", "diff", "genre")
+
+class DailyVoteManager:
+    """Posts a daily 1-hour vote with hidden hints, then creates a battle from the winner."""
+    VOTE_KEY = "daily_vote"
+
+    def __init__(self, bot: "LBClient", weekly: WeeklyBattleManager):
+        self.bot = bot
+        self.weekly = weekly
+        self.lock = asyncio.Lock()
+        self._finalize_task: Optional[asyncio.Task] = None
+        # Ensure state slot exists
+        st = self.weekly.state
+        if self.VOTE_KEY not in st:
+            st[self.VOTE_KEY] = None
+            _write_manager_state(st)
+
+    # ---- helpers ----
+    def _vote(self) -> Optional[dict]:
+        return self.weekly.state.get(self.VOTE_KEY) or None
+
+    async def _channel(self) -> Optional[discord.abc.Messageable]:
+        chan_id = getattr(self.bot, "announce_channel_id", None)
+        if not chan_id:
+            return None
+        return self.bot.get_channel(chan_id) or await self.bot.fetch_channel(chan_id)
+
+    def active_vote_ends_at(self) -> Optional[datetime]:
+        v = self._vote()
+        return _from_iso(v.get("ends_at")) if v else None
+
+    def _hint_for_song(self, song: Song, instr_key: str) -> str:
+        """
+        Build a localized hint line using your Play a Show strings.
+        Tries several categories and picks one at random.
+        """
+        ideas: list[str] = []
+
+        # Genre
+        if getattr(song, "genre", None):
+            # DTA uses either genre or subgenre — we'll just use genre here.
+            ideas.append(loc("play_a_show_genre", pretty_genre(song.genre)))
+
+        # Year (sometimes decade)
+        year = None
+        try:
+            if getattr(song, "year", None):
+                year = int(song.year)
+        except Exception:
+            year = None
+        if year:
+            if random.choice((True, False)):
+                ideas.append(loc("play_a_show_year", year))
+            else:
+                decade = (year // 10) * 10
+                ideas.append(loc("play_a_show_year_decade", decade))
+
+        # Album
+        if getattr(song, "album_name", None):
+            # Original has "%s <alt>%s</alt>" (album, artist). Discord: album only.
+            ideas.append(loc("play_a_show_album", song.album_name))
+
+        # Artist
+        if getattr(song, "artist", None):
+            ideas.append(loc("play_a_show_artist", song.artist))
+
+        # Length (ms) thresholds match the DTA logic: >420s, >240s, >120s
+        length_ms = getattr(song, "length_ms", None)
+        if isinstance(length_ms, (int, float)) and length_ms > 0:
+            if length_ms > 420_000:
+                ideas.append(loc("play_a_show_really_long"))
+            elif length_ms > 240_000:
+                ideas.append(loc("play_a_show_long"))
+            elif length_ms > 120_000:
+                ideas.append(loc("play_a_show_short"))
+            else:
+                ideas.append(loc("play_a_show_really_short"))
+
+        # Tempo (if available) — map to slow/med/fast as in DTA
+        tempo = getattr(song, "anim_tempo", None)  # if you store it
+        if tempo in (16, 32, 64, 112):
+            ideas.append({
+                16: loc("play_a_show_slow"),
+                32: loc("play_a_show_med"),
+                64: loc("play_a_show_fast"),
+                112: loc("play_a_show_fast"),
+            }[tempo])
+
+        # Difficulty (localized, “A/An %s song on %s”)
+        # Use your existing helpers to get tier and label.
+        try:
+            tier = _rank(song, instr_key) or 0  # 0..?
+            diff_label = difficulty_label(_th_key(instr_key), tier)  # e.g., "Apprentice"
+            instr_name = INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())
+
+            # Match DTA special-casing: tiers 1 and 6 use the "An %s..." key.
+            use_an = tier in (1, 6)
+            if not use_an:
+                # Fallback: article by vowel sound
+                use_an = str(diff_label).strip().lower()[:1] in "aeiou"
+
+            if diff_label:
+                ideas.append(
+                    loc("play_a_show_diff_an" if use_an else "play_a_show_diff", diff_label, instr_name)
+                )
+        except Exception:
+            pass
+
+        # Source / UGC author (if you track them)
+        if getattr(song, "author", None):
+            ideas.append(loc("play_a_show_author", song.author))
+        elif getattr(song, "source", None):
+            # e.g., "RBN", "RB4", "Customs", etc.
+            ideas.append(loc("play_a_show_source", pretty_source(song.source)))
+
+        # Fallback
+        if not ideas:
+            ideas.append(loc("play_a_show_med"))  # “A completely random song”
+
+        return random.choice(ideas)
+
+    def _decade_label(self, year: int) -> str:
+        """Return 'the 70's' style label from a year."""
+        decade = (int(year) // 10) * 10
+        # "the 70's" rather than "the 70s"
+        short = str(decade)[-2:]
+        return f"the {short}'s"
+
+    def _difficulty_hint(self, s, instr_key: str) -> str | None:
+        """Localized-ish difficulty line: 'A <Tier> song on <Instrument>' with correct article."""
+        try:
+            tier = _rank(s, instr_key) or 0
+            tier_name = difficulty_label(_th_key(instr_key), tier)  # your existing helper
+            instr_name = INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())
+            if not tier_name:
+                return None
+            needs_an = str(tier_name).strip().lower()[:1] in "aeiou"
+            return f"{'An' if needs_an else 'A'} {tier_name} song on {instr_name}"
+        except Exception:
+            return None
+
+    def _hint_for_category(self, s, category: str, instr_key: str) -> str | None:
+        """Build the display hint for one category (never reveals the song title)."""
+        if category == "genre":
+            g = getattr(s, "genre", None)
+            if g:
+                return f"A {pretty_genre(g)} song"
+
+        if category == "year":
+            y = getattr(s, "year", None)
+            try:
+                y = int(y) if y is not None else None
+            except Exception:
+                y = None
+            if y:
+                if random.choice((True, False)):
+                    return f"A song from {y}"
+                else:
+                    return f"A song from {self._decade_label(y)}"
+
+        if category == "length":
+            # (Not used; keeping for parity if you add later)
+            ms = getattr(s, "length_ms", None)
+            if isinstance(ms, int):
+                if ms > 420_000: return "A REALLY long song"
+                if ms > 240_000: return "A long song"
+                if ms > 120_000: return "A short song"
+                return "A REALLY short song"
+
+        if category == "song":
+            return "A completely random song"
+
+        if category == "tempo":
+            tempo = getattr(s, "anim_tempo", None)
+            if tempo in (16, 32, 64, 112):
+                return {16: "A slow song", 32: "A completely random song", 64: "A fast song", 112: "A fast song"}[tempo]
+
+        if category == "album":
+            alb = getattr(s, "album_name", None)
+            if alb:
+                return f"A song from {alb}"
+
+        if category == "artist":
+            art = getattr(s, "artist", None)
+            if art:
+                return f"A song by {art}"
+
+        if category == "diff":
+            return self._difficulty_hint(s, instr_key)
+
+        if category == "source":
+            src = getattr(s, "source", None)
+            if src:
+                return f"A song from {pretty_source(src)}"
+
+        return None
+
+    def _pick_song_for_category(self, pool: list, category: str, instr_key: str, used_ids: set[int]) -> tuple[object, str] | None:
+        """
+        Pick a song from pool that:
+          - has the instrument,
+          - hasn't been used,
+          - has metadata required by the category,
+          - yields a non-empty hint.
+        """
+        random.shuffle(pool)
+        for s in pool:
+            sid = getattr(s, "song_id", None)
+            if sid in used_ids:
+                continue
+            if not has_part(s, instr_key):
+                continue
+
+            # ensure metadata presence for the specific category
+            needed_ok = True
+            if category == "year":
+                try:
+                    y = int(getattr(s, "year", 0))
+                    needed_ok = y > 0
+                except Exception:
+                    needed_ok = False
+            elif category == "album":
+                needed_ok = bool(getattr(s, "album_name", None))
+            elif category == "artist":
+                needed_ok = bool(getattr(s, "artist", None))
+            elif category == "genre":
+                needed_ok = bool(getattr(s, "genre", None))
+            elif category == "diff":
+                needed_ok = self._difficulty_hint(s, instr_key) is not None
+            elif category == "source":
+                needed_ok = bool(getattr(s, "source", None))
+            elif category == "song":
+                needed_ok = True
+
+            if not needed_ok:
+                continue
+
+            hint = self._hint_for_category(s, category, instr_key)
+            if hint:
+                return s, hint
+
+        return None
+
+    def _build_vote_options(self, instr_key: str) -> list[dict]:
+        """
+        Create five unique option *types* (no duplicates), each bound to a hidden song.
+        Respects _eligible_songs() and instrument availability.
+        """
+        base_pool = self.weekly._eligible_songs()
+        used_song_ids: set[int] = set()
+        chosen: list[dict] = []
+
+        # Randomize category order, then fill up to 5
+        cats = list(VOTE_CATEGORIES)
+        random.shuffle(cats)
+
+        def try_fill_from(categories: list[str]):
+            for cat in categories:
+                if len(chosen) >= 5:
+                    break
+                pick = self._pick_song_for_category(base_pool, cat, instr_key, used_song_ids)
+                if pick:
+                    s, hint = pick
+                    sid = getattr(s, "song_id", None)
+                    used_song_ids.add(sid)
+                    chosen.append({
+                        "category": cat,
+                        "song_id": sid,
+                        "hint": hint
+                    })
+
+        # Primary pass: randomized categories
+        try_fill_from(cats)
+
+        # Fallbacks if we couldn't reach 5: allow "song" category to pad
+        if len(chosen) < 5:
+            pad_needed = 5 - len(chosen)
+            pads = ["song"] * pad_needed
+            try_fill_from(pads)
+
+        return chosen[:5]
+
+    def _default_thumb_url(self) -> str:
+        # Use the canonical default art used elsewhere in the bot.
+        return DEFAULT_SONG_ART
+
+    def _build_embed(self, vote: dict) -> discord.Embed:
+        instr_key = vote["instrument"]
+        ends = _from_iso(vote.get("ends_at"))
+        ts = int(ends.timestamp()) if ends else None
+
+        pretty_instr = INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())
+
+        # The three header lines you asked for:
+        header_lines = [
+            "🗳️ **Daily Vote — Score Snipe**",
+            f"**Instrument:** {pretty_instr}",
+            "React with **1–5** to vote. The actual songs are hidden until voting ends."
+        ]
+
+        # Show 1–5 with their hints
+        lines = []
+        for i, opt in enumerate(vote["options"][:5], start=1):
+            emoji = NUM_EMOJIS[i-1]
+            lines.append(f"{emoji} {opt['hint']}")
+
+        desc = "\n".join(header_lines + [""] + lines + (["", f"**Ends:** <t:{ts}:R>"] if ts else []))
+
+        e = discord.Embed(
+            description=desc,
+            color=0xF59E0B
+        )
+        e.set_thumbnail(url=self._default_thumb_url())  # top-right default image
+        return e
+
+
+    # ---- public API ----
+    async def start_vote_now(self) -> bool:
+        """Start a vote right now (1 hour). False if one is already active."""
+        async with self.lock:
+            v = self._vote()
+            if v and _utcnow() < _from_iso(v["ends_at"]):
+                return False
+
+            instr_key = self.weekly._instrument_for_today(_utcnow())
+            options = self._build_vote_options(instr_key)
+            if not options:
+                return False
+
+            ends_at = _utcnow() + timedelta(hours=1)
+            payload = {
+                "instrument": instr_key,               # string key like 'guitar'
+                "options": options,                    # [{song_id, hint}, ...]
+                "created_at": _to_iso(_utcnow()),
+                "ends_at": _to_iso(ends_at),
+                "message_id": None,
+                "channel_id": None,
+            }
+
+            ch = await self._channel()
+            if not ch:
+                return False
+
+            embed = self._build_embed(payload)
+            msg = await ch.send(embed=embed)
+
+            # Pre-seed reactions 1–5
+            for i in range(len(options)):
+                try:
+                    await msg.add_reaction(NUM_EMOJIS[i])
+                except Exception:
+                    pass
+
+            payload["message_id"] = str(msg.id)
+            payload["channel_id"] = int(getattr(ch, "id", 0))
+
+            # Persist
+            self.weekly.state[self.VOTE_KEY] = payload
+            _write_manager_state(self.weekly.state)
+
+            # (Re)arm finalize task
+            if self._finalize_task and not self._finalize_task.done():
+                self._finalize_task.cancel()
+            self._finalize_task = asyncio.create_task(self._finalize_when_due())
+
+            return True
+
+    async def _finalize_when_due(self):
+        try:
+            while True:
+                async with self.lock:
+                    v = self._vote()
+                    if not v:
+                        return
+                    due = _from_iso(v["ends_at"])
+                    if not due:
+                        return
+                    now = _utcnow()
+                    if now >= due:
+                        break
+                    await asyncio.sleep(min(60, max(1, int((due - now).total_seconds()))))
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            return
+
+        await self._finalize_vote()
+
+    async def _finalize_vote(self):
+        async with self.lock:
+            v = self._vote()
+            if not v:
+                return
+            ch = await self._channel()
+            if not ch:
+                return
+
+            # Fetch the message and tally reactions 1–5 (subtract our bot seed)
+            try:
+                msg = await ch.fetch_message(int(v["message_id"]))
+            except Exception:
+                msg = None
+
+            counts = [0,0,0,0,0]
+            if msg:
+                for r in msg.reactions:
+                    if r.emoji in NUM_EMOJIS:
+                        idx = NUM_EMOJIS.index(str(r.emoji))
+                        try:
+                            # r.count includes our seeded reaction; subtract 1 (min 0)
+                            counts[idx] = max(0, int(r.count) - 1)
+                        except Exception:
+                            counts[idx] = 0
+
+            # Pick the winner (max; tiebreak random among ties; if all zero, random pick)
+            options = v["options"]
+            if any(c > 0 for c in counts):
+                maxc = max(counts)
+                finalists = [i for i,c in enumerate(counts) if c == maxc]
+                win_ix = random.choice(finalists)
+            else:
+                win_ix = random.randrange(len(options))
+
+            winner = options[win_ix]
+            instr_key = v["instrument"]
+            sid = int(winner["song_id"])
+            song = self.bot.song_index.by_id.get(sid) if self.bot.song_index else None
+
+            # Reveal & close the vote embed
+            if msg:
+                reveal_lines = []
+                for i, opt in enumerate(options, start=1):
+                    s = self.bot.song_index.by_id.get(int(opt["song_id"])) if self.bot.song_index else None
+                    title = s.name if s else f"ID {opt['song_id']}"
+                    artist = s.artist if (s and s.artist) else "—"
+                    mark = "✅" if (i-1) == win_ix else "—"
+                    reveal_lines.append(f"{NUM_EMOJIS[i-1]} **{opt['hint']}** → *{title}* by _{artist}_ {mark}")
+
+                ends = _from_iso(v["ends_at"])
+                ts = int(ends.timestamp()) if ends else None
+                desc = "\n".join([
+                    f"**Instrument:** {INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())}",
+                    "Results:",
+                    "",
+                    *reveal_lines,
+                    "",
+                    f"Ended <t:{ts}:R>."
+                ])
+                e = discord.Embed(title="🗳️ Daily Vote — Results", description=desc, color=0x10B981)
+                try:
+                    await msg.edit(embed=e, view=None)
+                except Exception:
+                    pass
+
+            # Create the battle and announce
+            if song and has_part(song, instr_key):
+                rec = await self.weekly._create_one_battle(song=song, instr_key=instr_key, week_num=int(self.weekly.state.get("week") or 1))
+                if rec:
+                    await self.weekly.post_announcement([rec], increment_week=False)
+
+            # Clear vote state
+            self.weekly.state[self.VOTE_KEY] = None
+            _write_manager_state(self.weekly.state)
 
 class SubscriptionManager:
     """Tracks battle subscriptions and sends DM alerts when 1st place changes hands."""
@@ -1927,7 +2692,7 @@ class SubscriptionManager:
             album_line = song.album_name or "—"
             if song.year:
                 album_line = f"{album_line} ({song.year})"
-            details = f"{(song.genre or '—')} • {(song.source or '—')} • ID `{song.song_id}`"
+            details = f"{pretty_genre(song.genre)} • {pretty_source(song.source)} • ID `{song.song_id}`"
 
             # Row 1: Artist | Album | pad
             embed.add_field(name="Artist", value=artist, inline=True)
@@ -2190,6 +2955,7 @@ class LBClient(discord.Client):
         self.song_index = load_song_map(SONG_MAP_PATH)
         self.http_session = aiohttp.ClientSession()
         self.manager = WeeklyBattleManager(self)
+        self.daily_vote = DailyVoteManager(self, self.manager)
         self.subscriptions = SubscriptionManager(self)
 
         # --- Guild-only commands, like your example bot ---
@@ -2412,9 +3178,7 @@ class BattleListView(discord.ui.View):
 
         # Optionally include "Week N" if present in the battle title
         if song:
-            genre  = song.genre or "—"
-            source = song.source or "—"
-            footer_txt = f"Genre: {genre} • Source: {source} • Song ID: {song.song_id}"
+            footer_txt = f"Genre: {pretty_genre(song.genre)} • Source: {pretty_source(song.source)} • Song ID: {song.song_id}"
         else:
             footer_txt = f"Song ID: {sid or 'Unknown'}"
 
@@ -2723,6 +3487,38 @@ class BattleNextButton(discord.ui.Button):
             view.page += 1
         await view.update(interaction)
 
+class VoteButton(discord.ui.Button):
+    def __init__(self, manager: "DailyVoteManager", vote_id: str, idx: int):
+        super().__init__(
+            label=str(idx),
+            style=discord.ButtonStyle.primary,
+            custom_id=f"dailyvote:{vote_id}:{idx}"  # persistent across restarts
+        )
+        self.manager = manager
+        self.vote_id = vote_id
+        self.idx = idx
+
+    async def callback(self, interaction: discord.Interaction):
+        # defer early so we don't hit the 3s window
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        ok, msg = await self.manager.register_vote(self.vote_id, interaction.user.id, self.idx)
+        try:
+            # Always try to update the originating message with the latest tallies
+            await self.manager.refresh_vote_message_from_interaction(interaction)
+        except Exception:
+            pass
+        if ok:
+            await interaction.followup.send(f"✅ Your vote for **#{self.idx}** is recorded.", ephemeral=True)
+        else:
+            await interaction.followup.send(f"⚠️ {msg}", ephemeral=True)
+
+
+class DailyVoteView(discord.ui.View):
+    """Persistent view so buttons work after bot restarts."""
+    def __init__(self, manager: "DailyVoteManager", vote_id: str):
+        super().__init__(timeout=None)  # persistent
+        for i in range(1, 6):
+            self.add_item(VoteButton(manager, vote_id, i))
 
 class SongSelect(discord.ui.Select):
     def __init__(self, options: List[discord.SelectOption], matches: List[Song], instrument: str, interaction: discord.Interaction, callback_func):
@@ -3316,21 +4112,50 @@ async def z_admin_auto(
 
     # ---------------- RUN NOW ---------------
     if act == "run":
-        try:
-            created = await bot.manager.run_once(count=count)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Run failed: {e}", ephemeral=True)
+        dv = getattr(bot, "daily_vote", None)
+        if not dv:
+            await interaction.followup.send("DailyVoteManager not ready.", ephemeral=True)
             return
 
-        if not created:
-            await interaction.followup.send("No battles created.", ephemeral=True)
+        # If a vote is already active, don't double-post
+        active = dv._vote()
+        if active and _utcnow() < _from_iso(active["ends_at"]):
+            ends = _from_iso(active["ends_at"])
+            ts = int(ends.timestamp()) if ends else None
+            await interaction.followup.send(
+                f"A vote is already running and ends <t:{ts}:R>.", ephemeral=True
+            )
             return
 
-        lines = [f"✅ Created {len(created)} battle(s):"]
-        for rec in created:
-            lines.append(f"• ID `{rec['battle_id']}` — {rec['title']}")
-        await interaction.followup.send("\n".join(lines), ephemeral=True)
+        ok = await dv.start_vote_now()
+        if not ok:
+            await interaction.followup.send("Could not start a new vote (no candidates / channel missing).", ephemeral=True)
+            return
+
+        ends = dv.active_vote_ends_at()
+        ts = int(ends.timestamp()) if ends else None
+        await interaction.followup.send(
+            f"✅ Started a new daily vote. Ends <t:{ts}:R>.", ephemeral=True
+        )
         return
+
+    ## ---------------- RUN NOW ---------------
+    #if act == "run":
+    #    try:
+    #        created = await bot.manager.run_once(count=count)
+    #    except Exception as e:
+    #        await interaction.followup.send(f"❌ Run failed: {e}", ephemeral=True)
+    #        return
+
+    #    if not created:
+    #        await interaction.followup.send("No battles created.", ephemeral=True)
+    #        return
+
+    #    lines = [f"✅ Created {len(created)} battle(s):"]
+    #    for rec in created:
+    #        lines.append(f"• ID `{rec['battle_id']}` — {rec['title']}")
+    #    await interaction.followup.send("\n".join(lines), ephemeral=True)
+    #    return
 
     # ------------- TEST EXPIRED WINNERS (iterate ALL) -------------
     if act == "test_expired":
