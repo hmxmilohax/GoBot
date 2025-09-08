@@ -323,6 +323,103 @@ LOCALE_GENRES = {
     "subgenre_samba": "Samba",
     "subgenre_sertanejo": "Sertanejo",
     "subgenre_sertanejo_universitario": "Sertanejo Universitário",
+
+    # Subgenre (general)
+    "subgenre_acapella": "A capella",
+    "subgenre_acidjazz": "Acid Jazz",
+    "subgenre_acoustic": "Acoustic",
+    "subgenre_alternative": "Alternative",
+    "subgenre_alternativerap": "Alternative Rap",
+    "subgenre_ambient": "Ambient",
+    "subgenre_arena": "Arena",
+    "subgenre_black": "Black",
+    "subgenre_bluegrass": "Bluegrass",
+    "subgenre_blues": "Blues",
+    "subgenre_breakbeat": "Breakbeat",
+    "subgenre_chicago": "Chicago",
+    "subgenre_chiptune": "Chiptune",
+    "subgenre_classic": "Classic",
+    "subgenre_classical": "Classical",
+    "subgenre_classicrock": "Classic Rock",
+    "subgenre_college": "College",
+    "subgenre_contemporary": "Contemporary",
+    "subgenre_contemporaryfolk": "Contemporary Folk",
+    "subgenre_core": "Core",
+    "subgenre_country": "Country",
+    "subgenre_dance": "Dance",
+    "subgenre_dancepunk": "Dance Punk",
+    "subgenre_darkwave": "Dark Wave",
+    "subgenre_death": "Death",
+    "subgenre_delta": "Delta",
+    "subgenre_disco": "Disco",
+    "subgenre_downtempo": "Downtempo",
+    "subgenre_drumandbass": "Drum and Bass",
+    "subgenre_dub": "Dub",
+    "subgenre_electric": "Electric",
+    "subgenre_electroclash": "Electroclash",
+    "subgenre_electronica": "Electronica",
+    "subgenre_emo": "Emo",
+    "subgenre_experimental": "Experimental",
+    "subgenre_folkrock": "Folk Rock",
+    "subgenre_funk": "Funk",
+    "subgenre_fusion": "Fusion",
+    "subgenre_gangsta": "Gangsta",
+    "subgenre_garage": "Garage",
+    "subgenre_glam": "Glam",
+    "subgenre_goth": "Goth",
+    "subgenre_grunge": "Grunge",
+    "subgenre_hair": "Hair",
+    "subgenre_hardcore": "Hardcore",
+    "subgenre_hardcoredance": "Hardcore Dance",
+    "subgenre_hardcorerap": "Hardcore Rap",
+    "subgenre_hardrock": "Hard Rock",
+    "subgenre_hiphop": "Hip Hop",
+    "subgenre_honkytonk": "Honky Tonk",
+    "subgenre_house": "House",
+    "subgenre_indierock": "Indie Rock",
+    "subgenre_industrial": "Industrial",
+    "subgenre_lofi": "Lo-fi",
+    "subgenre_mathrock": "Math Rock",
+    "subgenre_metal": "Metal",
+    "subgenre_motown": "Motown",
+    "subgenre_new_wave": "New Wave",
+    "subgenre_noise": "Noise",
+    "subgenre_novelty": "Novelty",
+    "subgenre_numetal": "Nu-Metal",
+    "subgenre_oldies": "Oldies",
+    "subgenre_oldschoolhiphop": "Old School Hip Hop",
+    "subgenre_other": "Other",
+    "subgenre_outlaw": "Outlaw",
+    "subgenre_pop": "Pop",
+    "subgenre_postrock": "Post Rock",
+    "subgenre_power": "Power",
+    "subgenre_prog": "Prog",
+    "subgenre_progrock": "Prog Rock",
+    "subgenre_psychadelic": "Psychedelic",
+    "subgenre_ragtime": "Ragtime",
+    "subgenre_rap": "Rap",
+    "subgenre_reggae": "Reggae",
+    "subgenre_rhythmandblues": "Rhythm and Blues",
+    "subgenre_rock": "Rock",
+    "subgenre_rockabilly": "Rockabilly",
+    "subgenre_rockandroll": "Rock and Roll",
+    "subgenre_shoegazing": "Shoegazing",
+    "subgenre_ska": "Ska",
+    "subgenre_smooth": "Smooth",
+    "subgenre_softrock": "Soft Rock",
+    "subgenre_soul": "Soul",
+    "subgenre_southernrock": "Southern Rock",
+    "subgenre_speed": "Speed",
+    "subgenre_surf": "Surf",
+    "subgenre_synth": "Synthpop",
+    "subgenre_techno": "Techno",
+    "subgenre_teen": "Teen",
+    "subgenre_thrash": "Thrash",
+    "subgenre_traditionalfolk": "Traditional Folk",
+    "subgenre_trance": "Trance",
+    "subgenre_triphop": "Trip Hop",
+    "subgenre_undergroundrap": "Underground Rap",
+
 }
 
 # Merge into LOCALE with explicit prefixes for easy lookup/override
@@ -582,6 +679,8 @@ class Song:
     source: Optional[str] = None
     author: Optional[str] = None
     ranks: Dict[str, int] = field(default_factory=dict)
+    sub_genre: Optional[str] = None
+    length_ms: Optional[int] = None
 
 class SongIndex:
     def __init__(self, songs: List[Song]):
@@ -846,6 +945,8 @@ def _parse_block(block: str) -> Optional[Song]:
     year   = rx(r'\(year_released\s+(\d+)\)')
     song_id = rx(r'\(song_id\s+(\d+)\)')
     genre  = rx(r'\(genre\s+([a-zA-Z0-9_]+)\)') or rx(r'\(genre\s+"([^"]+)"\)')
+    subg   = rx(r'\(sub_genre\s+([a-zA-Z0-9_]+)\)') or rx(r'\(sub_genre\s+"([^"]+)"\)')
+    length = rx(r'\(song_length\s+(\d+)\)')     
     source = rx(r'\(game_origin\s+([a-zA-Z0-9_]+)\)') or rx(r'\(game_origin\s+"([^"]+)"\)')
     author = rx(r'\(author\s+"([^"]+)"\)')
 
@@ -870,9 +971,17 @@ def _parse_block(block: str) -> Optional[Song]:
             source=source,
             author=author,
             ranks=ranks,
+            sub_genre=subg,
+            length_ms=(int(length) if length else None),
         )
     return None
     
+def _preferred_genre_code(song: Song) -> Optional[str]:
+    sg = (getattr(song, "sub_genre", None) or "").strip().lower()
+    if sg and sg != "subgenre_other":
+        return song.sub_genre
+    return getattr(song, "genre", None)
+
 def _is_numeric(s: str) -> bool:
     s = s.strip()
     return s.isdigit()
@@ -2007,7 +2116,7 @@ class WeeklyBattleManager:
             }
 
 NUM_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
-VOTE_CATEGORIES = ("year", "source", "song", "album", "artist", "diff", "genre")
+VOTE_CATEGORIES = ("year", "source", "song", "album", "artist", "diff", "genre", "song_length")
 
 def _supports_native_polls() -> bool:
     # feature-detect: new discord.py exposes these classes
@@ -2182,8 +2291,14 @@ class DailyVoteManager:
 
     def _hint_for_category(self, s, category: str, instr_key: str) -> str | None:
         """Build the display hint for one category (never reveals the song title)."""
+        if category == "song_length":
+            ms = getattr(s, "length_ms", None)
+            if isinstance(ms, int) and ms > 0:
+                minutes = max(1, int(round(ms / 60000.0)))
+                return f"A {minutes} minute long song"
+
         if category == "genre":
-            g = getattr(s, "genre", None)
+            g = _preferred_genre_code(s)
             if g:
                 return f"A {pretty_genre(g)} song"
 
@@ -2265,11 +2380,14 @@ class DailyVoteManager:
             elif category == "artist":
                 needed_ok = bool(getattr(s, "artist", None))
             elif category == "genre":
-                needed_ok = bool(getattr(s, "genre", None))
+                needed_ok = bool(_preferred_genre_code(s))
             elif category == "diff":
                 needed_ok = self._difficulty_hint(s, instr_key) is not None
             elif category == "source":
                 needed_ok = bool(getattr(s, "source", None))
+            elif category == "song_length":
+                lm = getattr(s, "length_ms", None)
+                needed_ok = isinstance(lm, int) and lm > 0
             elif category == "song":
                 needed_ok = True
 
