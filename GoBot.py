@@ -3141,35 +3141,29 @@ class LBClient(discord.Client):
         self.subscriptions: Optional[SubscriptionManager] = None
 
     async def setup_hook(self) -> None:
+        # Init deps
         self.song_index = load_song_map(SONG_MAP_PATH)
         self.http_session = aiohttp.ClientSession()
+
+        # Background features can stay as-is; they only post to your configured channels.
         self.manager = WeeklyBattleManager(self)
         self.daily_vote = DailyVoteManager(self, self.manager)
         self.subscriptions = SubscriptionManager(self)
 
-        # --- Guild-only commands, like your example bot ---
+        # ✅ Register commands GLOBALLY so they work in every server
+        synced_global = await self.tree.sync()
+        print(f"Synced {len(synced_global)} global commands")
+
+        # ✅ Optional: also sync in your dev guild for fast updates (WITHOUT clearing globals)
         if getattr(self, "dev_guild_id", None):
-            guild = discord.Object(id=self.dev_guild_id)
-
-            # 1) Rebuild the guild command set from your global definitions
-            #    (clears old guild copies to avoid stale dupes)
-            self.tree.clear_commands(guild=guild)
-            self.tree.copy_global_to(guild=guild)
-            synced = await self.tree.sync(guild=guild)
-            print(f"Synced {len(synced)} guild commands to {self.dev_guild_id}")
-
-            # 2) PURGE GLOBAL COMMANDS so they don't also appear in the guild
-            #    (safe to run every boot; removes any globally-registered duplicates)
-            self.tree.clear_commands(guild=None)   # ← keyword-only arg; None targets GLOBAL registry
             try:
-                await self.tree.sync()             # push the empty global set to Discord (deletes globals)
-                print("Cleared global commands")
+                dev = discord.Object(id=self.dev_guild_id)
+                # NOTE: don't copy_global_to(); just sync the guild (fast propagation for any guild-only cmds you add)
+                synced_dev = await self.tree.sync(guild=dev)
+                print(f"Also synced {len(synced_dev)} commands to dev guild {self.dev_guild_id}")
             except Exception as e:
-                print(f"[WARN] Clearing global commands failed: {e!r}")
-        else:
-            # Fallback: no guild configured → keep global sync
-            synced = await self.tree.sync()
-            print(f"Synced {len(synced)} global commands")
+                print(f"[WARN] Dev guild sync failed: {e!r}")
+
 
     async def close(self) -> None:
         if self.http_session:
