@@ -2293,9 +2293,20 @@ class DailyVoteManager:
         """Build the display hint for one category (never reveals the song title)."""
         if category == "song_length":
             ms = getattr(s, "length_ms", None)
-            if isinstance(ms, int) and ms > 0:
-                minutes = max(1, int(round(ms / 60000.0)))
-                return f"A {minutes} minute long song"
+            if isinstance(ms, (int, float)) and ms > 0:
+                if random.choice((True, False)):
+                    minutes = max(1, int(round(ms / 60000.0)))
+                    unit = "minute" if minutes == 1 else "minutes"
+                    return f"A {minutes} {unit} long song"
+                else:
+                    if ms >= 420_000:
+                        return "A REALLY long song (7m+)"
+                    elif ms >= 240_000:
+                        return "A long song (4–7m)"
+                    elif ms >= 120_000:
+                        return "A short song (2–4m)"
+                    else:
+                        return "A REALLY short song (0–2m)"
 
         if category == "genre":
             g = _preferred_genre_code(s)
@@ -2313,15 +2324,6 @@ class DailyVoteManager:
                     return f"A song from {y}"
                 else:
                     return f"A song from {self._decade_label(y)}"
-
-        if category == "length":
-            # (Not used; keeping for parity if you add later)
-            ms = getattr(s, "length_ms", None)
-            if isinstance(ms, int):
-                if ms > 420_000: return "A REALLY long song"
-                if ms > 240_000: return "A long song"
-                if ms > 120_000: return "A short song"
-                return "A REALLY short song"
 
         if category == "song":
             return f"{s.name} by {s.artist or '—'}"
