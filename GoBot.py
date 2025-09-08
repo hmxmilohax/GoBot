@@ -2676,20 +2676,29 @@ class DailyVoteManager:
 
         # Reveal message (map hints -> real titles; mark the winner)
         if msg:
+            # after computing counts / finalists / win_ix:
+            tied = any(counts) and len([c for c in counts if c == max(counts)]) > 1
+            tie_note = (
+                f"Tie between options {', '.join(str(i+1) for i, c in enumerate(counts) if c == max(counts))} — "
+                f"randomly selected #{win_ix+1}."
+                if tied else None
+            )
+
+            # when building reveal_lines:
             reveal_lines = []
             for i, opt in enumerate(options):
                 s = self.bot.song_index.by_id.get(int(opt["song_id"])) if self.bot.song_index else None
                 title = s.name if s else f"ID {opt['song_id']}"
                 artist = s.artist if (s and s.artist) else "—"
                 mark = "✅" if i == win_ix else "—"
-                reveal_lines.append(f"{i+1}. **{opt['hint']}** → *{title}* by _{artist}_ {mark}")
+                votes = counts[i] if i < len(counts) else 0
+                reveal_lines.append(f"{i+1}. **{opt['hint']}** → *{title}* by _{artist}_ {mark} — {votes} vote(s)")
 
-            desc = "\n".join([
-                f"**Instrument:** {INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())}",
-                "Results:",
-                "",
-                *reveal_lines,
-            ])
+            desc = "\n".join(
+                [f"**Instrument:** {INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())}", "Results:", ""]
+                + (["*"+tie_note+"*", ""] if tie_note else [])
+                + reveal_lines
+            )
             e = discord.Embed(title="🗳️ Daily Vote — Results", description=desc, color=0x10B981)
             try:
                 await msg.reply(embed=e, mention_author=False)
