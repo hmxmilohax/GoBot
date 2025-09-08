@@ -653,7 +653,7 @@ def _base_part(instr_key: str) -> str:
 def _as_dt(v) -> Optional[datetime]:
     """Accepts epoch int/float, digit string, or ISO8601 → timezone-aware UTC datetime."""
     if isinstance(v, (int, float)):
-        return datetime.utcfromtimestamp(int(v)).replace(tzinfo=timezone.utc)
+        return datetime.fromtimestamp(int(v), tz=timezone.utc)
     if isinstance(v, str):
         s = v.strip()
         if s.isdigit():
@@ -1142,8 +1142,8 @@ async def fetch_battle_leaderboard(session: aiohttp.ClientSession, battle_id: in
     except Exception:
         return None
 
-def _utcnow():
-    return datetime.utcnow().replace(tzinfo=timezone.utc)
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 def _to_iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -3407,8 +3407,13 @@ class BattleListView(discord.ui.View):
             for item in self.children:
                 item.disabled = True
             if self.message:
-                await self.message.edit(view=self)
+                try:
+                    await self.message.edit(view=self)
+                except (discord.NotFound, discord.HTTPException):
+                    # Message was deleted or otherwise not editable; that's OK.
+                    pass
         except Exception:
+            # Swallow anything so the background task never leaks an exception
             pass
 
 
@@ -3462,8 +3467,13 @@ class LeaderboardView(discord.ui.View):
             for item in self.children:
                 item.disabled = True
             if self.message:
-                await self.message.edit(view=self)
+                try:
+                    await self.message.edit(view=self)
+                except (discord.NotFound, discord.HTTPException):
+                    # Message was deleted or otherwise not editable; that's OK.
+                    pass
         except Exception:
+            # Swallow anything so the background task never leaks an exception
             pass
 
 
@@ -3598,15 +3608,6 @@ class SongSelectView(discord.ui.View):
         self.add_item(SongSelect(options, matches, instrument, interaction, callback_func))
         self.message: Optional[discord.Message] = None
 
-    async def on_timeout(self):
-        try:
-            for item in self.children:
-                item.disabled = True
-            if self.message:
-                await self.message.edit(view=self)
-        except Exception:
-            pass
-
     def _refresh_buttons(self):
         self.clear_items()
         total_pages = max(1, len(self.battles))
@@ -3628,7 +3629,8 @@ class SongSelectView(discord.ui.View):
         embed.add_field(name="Description", value=battle.get("description", "No description"), inline=False)
 
         # Format Discord live time tags
-        embed.add_field(name="Starts", value=f"<t:{battle['starts_at']}:R>", inline=True)
+        ts = self._to_unix(battle.get("starts_at"))
+        embed.add_field(name="Starts", value=(f"<t:{ts}:R>" if ts else "—"), inline=True)
         embed.add_field(name="Ends", value=f"<t:{battle['expires_at']}:R>", inline=True)
 
         self._refresh_buttons()
@@ -3642,10 +3644,18 @@ class SongSelectView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
     async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
-        if self.message:
-            await self.message.edit(view=self)
+        try:
+            for item in self.children:
+                item.disabled = True
+            if self.message:
+                try:
+                    await self.message.edit(view=self)
+                except (discord.NotFound, discord.HTTPException):
+                    # Message was deleted or otherwise not editable; that's OK.
+                    pass
+        except Exception:
+            # Swallow anything so the background task never leaks an exception
+            pass
 
 class BattlePrevButton(discord.ui.Button):
     def __init__(self, disabled=False):
