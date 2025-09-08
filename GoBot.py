@@ -2135,6 +2135,14 @@ async def _can_send_polls(ch: discord.abc.Messageable) -> bool:
     except Exception:
         return False
 
+def _next_local_noon_utc(self, now: Optional[datetime] = None) -> datetime:
+        """Return the next 12:00 PM in America/Chicago as a UTC datetime."""
+        now = now or _utcnow()
+        local_now = now.astimezone(self._vote_tz)
+        target = local_now.replace(hour=12, minute=0, second=0, microsecond=0)
+        if target <= local_now:
+            target += timedelta(days=1)
+        return target.astimezone(timezone.utc)
 
 class DailyVoteManager:
     """Posts a daily 1-hour vote with hidden hints, then creates a battle from the winner."""
@@ -2145,6 +2153,8 @@ class DailyVoteManager:
         self.weekly = weekly
         self.lock = asyncio.Lock()
         self._finalize_task: Optional[asyncio.Task] = None
+        self._vote_tz = ZoneInfo("America/Chicago")
+        self._scheduler_task = asyncio.create_task(self._vote_loop())
         # Ensure state slot exists
         st = self.weekly.state
         if self.VOTE_KEY not in st:
@@ -2154,6 +2164,45 @@ class DailyVoteManager:
     # ---- helpers ----
     def _vote(self) -> Optional[dict]:
         return self.weekly.state.get(self.VOTE_KEY) or None
+
+    async def _vote_loop(self):
+        await self.bot.wait_until_ready()
+        while True:
+            try:
+                st = self.weekly.state
+                if not st.get("vote_enabled", True):
+                    await asyncio.sleep(30)
+                    continue
+
+                now = _utcnow()
+
+                # If a vote is already active, do nothing.
+                active = st.get(self.VOTE_KEY) or None
+                active_ends = _from_iso(active.get("ends_at")) if active else None
+                if active_ends and now < active_ends:
+                    await asyncio.sleep(30)
+                    continue
+
+                # Arm 'vote_next_start_at' if missing
+                due = _from_iso(st.get("vote_next_start_at"))
+                if not due:
+                    due = self._next_local_noon_utc(now)
+                    st["vote_next_start_at"] = _to_iso(due)
+                    _write_manager_state(st)
+
+                # Time to start?
+                if now >= due:
+                    ok = await self.start_vote_now()
+                    # Regardless of success, schedule the next noon so we don't spam
+                    st["vote_next_start_at"] = _to_iso(self._next_local_noon_utc(now + timedelta(seconds=5)))
+                    _write_manager_state(st)
+
+                await asyncio.sleep(30)
+            except Exception as e:
+                st = self.weekly.state
+                st["last_error"] = f"vote scheduler: {e!r}"
+                _write_manager_state(st)
+                await asyncio.sleep(10)
 
     def _supports_polls(self) -> bool:
         # Conservative feature detection across discord.py minor versions
