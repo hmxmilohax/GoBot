@@ -2009,6 +2009,24 @@ class WeeklyBattleManager:
 NUM_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
 VOTE_CATEGORIES = ("year", "source", "song", "album", "artist", "diff", "genre")
 
+def _supports_native_polls() -> bool:
+    # feature-detect: new discord.py exposes these classes
+    return all(hasattr(discord, attr) for attr in ("Poll", "PollAnswer", "PollMedia"))
+
+async def _can_send_polls(ch: discord.abc.Messageable) -> bool:
+    try:
+        # Polls must be sent in guild text channels or threads
+        if isinstance(ch, (discord.TextChannel, discord.Thread)):
+            me = ch.guild.me  # type: ignore
+            perms = ch.permissions_for(me)
+            # Newer discord.py exposes perms.create_polls; if absent, assume allowed
+            can_create = getattr(perms, "create_polls", True)
+            return perms.send_messages and can_create
+        return False
+    except Exception:
+        return False
+
+
 class DailyVoteManager:
     """Posts a daily 1-hour vote with hidden hints, then creates a battle from the winner."""
     VOTE_KEY = "daily_vote"
@@ -2027,6 +2045,20 @@ class DailyVoteManager:
     # ---- helpers ----
     def _vote(self) -> Optional[dict]:
         return self.weekly.state.get(self.VOTE_KEY) or None
+
+    def _supports_polls(self) -> bool:
+        # Conservative feature detection across discord.py minor versions
+        return hasattr(discord, "Poll") and hasattr(discord, "PollAnswer")
+
+    def _answer_count(self, ans) -> int:
+        # Different minors exposed slightly different names; be robust.
+        for attr in ("vote_count", "count", "votes"):
+            if hasattr(ans, attr) and getattr(ans, attr) is not None:
+                try:
+                    return int(getattr(ans, attr))
+                except Exception:
+                    pass
+        return 0
 
     async def _channel(self) -> Optional[discord.abc.Messageable]:
         chan_id = getattr(self.bot, "announce_channel_id", None)
@@ -2293,6 +2325,25 @@ class DailyVoteManager:
         # Use the canonical default art used elsewhere in the bot.
         return DEFAULT_SONG_ART
 
+    def _build_announce_embed(self, vote: dict) -> discord.Embed:
+        instr_key = vote["instrument"]
+        pretty_instr = INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())
+        ends = _from_iso(vote.get("ends_at"))
+        ts = int(ends.timestamp()) if ends else None
+
+        lines = [
+            "🗳️ **Daily Vote — Score Snipe**",
+            f"**Instrument:** {pretty_instr}",
+            "React with **1–5** to vote. The actual songs are hidden until voting ends.",
+            "",
+        ]
+        if ts:
+            lines.append(f"**Ends:** <t:{ts}:R>")
+
+        e = discord.Embed(description="\n".join(lines), color=0xF59E0B)
+        e.set_thumbnail(url=self._default_thumb_url())
+        return e
+
     def _build_embed(self, vote: dict) -> discord.Embed:
         instr_key = vote["instrument"]
         ends = _from_iso(vote.get("ends_at"))
@@ -2323,7 +2374,6 @@ class DailyVoteManager:
         return e
 
 
-    # ---- public API ----
     async def start_vote_now(self) -> bool:
         """Start a vote right now (1 hour). False if one is already active."""
         async with self.lock:
@@ -2337,37 +2387,45 @@ class DailyVoteManager:
                 return False
 
             ends_at = _utcnow() + timedelta(hours=1)
-            payload = {
-                "instrument": instr_key,               # string key like 'guitar'
-                "options": options,                    # [{song_id, hint}, ...]
-                "created_at": _to_iso(_utcnow()),
-                "ends_at": _to_iso(ends_at),
-                "message_id": None,
-                "channel_id": None,
-            }
-
             ch = await self._channel()
             if not ch:
                 return False
 
-            embed = self._build_embed(payload)
-            msg = await ch.send(embed=embed)
+            # Persisted vote payload (store both messages + channel)
+            payload = {
+                "instrument": instr_key,
+                "options": options,
+                "ends_at": _to_iso(ends_at),
+                "channel_id": ch.id,
+                "announce_message_id": None,
+                "poll_message_id": None,
+            }
 
-            # Pre-seed reactions 1–5
-            for i in range(len(options)):
-                try:
-                    await msg.add_reaction(NUM_EMOJIS[i])
-                except Exception:
-                    pass
+            # 1) Send the announcement embed that HIDES the options and pings the role.
+            role_id = getattr(self.bot, "ping_role_id", None)
+            announce_msg = await ch.send(
+                content=(f"<@&{role_id}>" if role_id else None),
+                embed=self._build_announce_embed(payload),
+                allowed_mentions=discord.AllowedMentions(roles=True, users=False, everyone=False),
+            )
+            payload["announce_message_id"] = str(announce_msg.id)
 
-            payload["message_id"] = str(msg.id)
-            payload["channel_id"] = int(getattr(ch, "id", 0))
+            # 2) Send the actual poll in a NEW message (no role ping here).
+            poll = discord.Poll(
+                question=f"Daily Vote — {INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())}",
+                duration=timedelta(hours=1),
+                multiple=False,
+            )
+            for opt in options[:10]:
+                poll.add_answer(text=opt["hint"][:55])  # Poll answers themselves are still the hints
 
-            # Persist
+            poll_msg = await ch.send(poll=poll)
+            payload["poll_message_id"] = str(poll_msg.id)
+
+            # Save state and arm the finalizer
             self.weekly.state[self.VOTE_KEY] = payload
             _write_manager_state(self.weekly.state)
 
-            # (Re)arm finalize task
             if self._finalize_task and not self._finalize_task.done():
                 self._finalize_task.cancel()
             self._finalize_task = asyncio.create_task(self._finalize_when_due())
@@ -2400,74 +2458,87 @@ class DailyVoteManager:
             v = self._vote()
             if not v:
                 return
-            ch = await self._channel()
-            if not ch:
-                return
 
-            # Fetch the message and tally reactions 1–5 (subtract our bot seed)
+        ch = await self._channel()
+        if not ch:
+            return
+
+        poll_msg_id = v.get("poll_message_id") or v.get("message_id")  # back-compat
+        if not poll_msg_id:
+            return
+
+        msg = await ch.fetch_message(int(poll_msg_id))
+        p = msg.poll
+
+        # If still active, end it…
+        if p and not p.is_finalized():
             try:
-                msg = await ch.fetch_message(int(v["message_id"]))
+                await p.end()
+                await asyncio.sleep(2)
+                msg = await ch.fetch_message(msg.id)
+                p = msg.poll
             except Exception:
-                msg = None
+                pass
 
-            counts = [0,0,0,0,0]
-            if msg:
-                for r in msg.reactions:
-                    if r.emoji in NUM_EMOJIS:
-                        idx = NUM_EMOJIS.index(str(r.emoji))
-                        try:
-                            # r.count includes our seeded reaction; subtract 1 (min 0)
-                            counts[idx] = max(0, int(r.count) - 1)
-                        except Exception:
-                            counts[idx] = 0
+        # Build counts aligned to Discord's displayed answer order
+        counts: list[int] = []
+        if p:
+            try:
+                counts = [self._answer_count(ans) for ans in p.answers]   # vote_count/count/votes
+            except Exception:
+                counts = []
+        if not counts:
+            # extreme fallback: no poll or unreadable → pretend all zeros
+            counts = [0] * len(v.get("options", []))
 
-            # Pick the winner (max; tiebreak random among ties; if all zero, random pick)
-            options = v["options"]
-            if any(c > 0 for c in counts):
-                maxc = max(counts)
-                finalists = [i for i,c in enumerate(counts) if c == maxc]
-                win_ix = random.choice(finalists)
-            else:
-                win_ix = random.randrange(len(options))
+        # Pick winner (tie-break randomly)
+        if any(counts):
+            maxc = max(counts)
+            finalists = [i for i, c in enumerate(counts) if c == maxc]
+            win_ix = random.choice(finalists)
+        else:
+            win_ix = random.randrange(max(1, len(v.get("options", [0]))))
 
-            winner = options[win_ix]
-            instr_key = v["instrument"]
-            sid = int(winner["song_id"])
-            song = self.bot.song_index.by_id.get(sid) if self.bot.song_index else None
+        options = v["options"]
+        winner  = options[win_ix]
+        instr_key = v["instrument"]
+        sid = int(winner["song_id"])
+        song = self.bot.song_index.by_id.get(sid) if self.bot.song_index else None
 
-            # Reveal & close the vote embed
-            if msg:
-                reveal_lines = []
-                for i, opt in enumerate(options, start=1):
-                    s = self.bot.song_index.by_id.get(int(opt["song_id"])) if self.bot.song_index else None
-                    title = s.name if s else f"ID {opt['song_id']}"
-                    artist = s.artist if (s and s.artist) else "—"
-                    mark = "✅" if (i-1) == win_ix else "—"
-                    reveal_lines.append(f"{NUM_EMOJIS[i-1]} **{opt['hint']}** → *{title}* by _{artist}_ {mark}")
+        # Reveal message (map hints -> real titles; mark the winner)
+        if msg:
+            reveal_lines = []
+            for i, opt in enumerate(options):
+                s = self.bot.song_index.by_id.get(int(opt["song_id"])) if self.bot.song_index else None
+                title = s.name if s else f"ID {opt['song_id']}"
+                artist = s.artist if (s and s.artist) else "—"
+                mark = "✅" if i == win_ix else "—"
+                reveal_lines.append(f"{i+1}. **{opt['hint']}** → *{title}* by _{artist}_ {mark}")
 
-                ends = _from_iso(v["ends_at"])
-                ts = int(ends.timestamp()) if ends else None
-                desc = "\n".join([
-                    f"**Instrument:** {INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())}",
-                    "Results:",
-                    "",
-                    *reveal_lines,
-                    "",
-                    f"Ended <t:{ts}:R>."
-                ])
-                e = discord.Embed(title="🗳️ Daily Vote — Results", description=desc, color=0x10B981)
-                try:
-                    await msg.edit(embed=e, view=None)
-                except Exception:
-                    pass
+            desc = "\n".join([
+                f"**Instrument:** {INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())}",
+                "Results:",
+                "",
+                *reveal_lines,
+            ])
+            e = discord.Embed(title="🗳️ Daily Vote — Results", description=desc, color=0x10B981)
+            try:
+                await msg.reply(embed=e, mention_author=False)
+            except Exception:
+                pass
 
-            # Create the battle and announce
-            if song and has_part(song, instr_key):
-                rec = await self.weekly._create_one_battle(song=song, instr_key=instr_key, week_num=int(self.weekly.state.get("week") or 1))
-                if rec:
-                    await self.weekly.post_announcement([rec], increment_week=False)
+        # Create the weekly battle from the winning song
+        if song and has_part(song, instr_key):
+            rec = await self.weekly._create_one_battle(
+                song=song,
+                instr_key=instr_key,
+                week_num=int(self.weekly.state.get("week") or 1),
+            )
+            if rec:
+                await self.weekly.post_announcement([rec], increment_week=False)
 
-            # Clear vote state
+        # Clear vote state
+        async with self.lock:
             self.weekly.state[self.VOTE_KEY] = None
             _write_manager_state(self.weekly.state)
 
@@ -4017,8 +4088,6 @@ async def unlink_cmd(interaction: discord.Interaction, name: str):
     final = _user_links(bot.manager.state, interaction.user.id)
     pretty = ", ".join(f"**{n}**" for n in final) if final else "—"
     await interaction.followup.send(f"Unlinked.\nYour linked names: {pretty}", ephemeral=True)
-
-
 
 @bot.tree.command(
     name="z_admin",
