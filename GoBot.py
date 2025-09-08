@@ -2324,7 +2324,7 @@ class DailyVoteManager:
                 return "A REALLY short song"
 
         if category == "song":
-            return f"**{s.name}** — {s.artist or '—'}"
+            return f"{s.name} by {s.artist or '—'}"
 
         if category == "tempo":
             tempo = getattr(s, "anim_tempo", None)
