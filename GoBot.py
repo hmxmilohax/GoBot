@@ -3453,7 +3453,7 @@ class LeaderboardView(discord.ui.View):
         if self.year:
             footer_parts.append(f"Year: {self.year}")
         if self.genre:
-            footer_parts.append(f"Genre: {self.genre}")
+            footer_parts.append(f"Genre: {pretty_genre(self.genre)}")
         embed.set_footer(text=" • ".join(footer_parts))
         self._refresh_buttons()
         if interaction:
@@ -3729,7 +3729,7 @@ class SongSelect(discord.ui.Select):
 @bot.tree.command(name="leaderboards", description="Search GoCentral leaderboards by song name/shortname/song_id.")
 @app_commands.describe(song="Song name (use quotes for exact match)", instrument="Instrument (guitar, bass, drums, vocals, keys)")
 async def leaderboards_cmd(interaction: discord.Interaction, song: str, instrument: str = "guitar"):
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    await interaction.response.defer(thinking=True)
 
     if not bot.song_index:
         await interaction.followup.send("Song map not loaded.")
@@ -3769,7 +3769,7 @@ async def leaderboards_cmd(interaction: discord.Interaction, song: str, instrume
                 artist=song_obj.artist,
                 instrument=INSTR_DISPLAY_NAMES.get(resolved_instr, resolved_instr.capitalize()),
                 year=song_obj.year,
-                genre=song_obj.genre,
+                genre=_preferred_genre_code(song_obj),
                 user=inter.user,
                 thumb_url=thumb,
             )
@@ -3783,8 +3783,9 @@ async def leaderboards_cmd(interaction: discord.Interaction, song: str, instrume
             footer_parts = [f"Artist: {song_obj.artist}"]
             if song_obj.year:
                 footer_parts.append(f"Year: {song_obj.year}")
-            if song_obj.genre:
-                footer_parts.append(f"Genre: {song_obj.genre}")
+            gcode = _preferred_genre_code(song_obj)
+            if gcode:
+                footer_parts.append(f"Genre: {pretty_genre(gcode)}")
             embed.set_footer(text=" • ".join(footer_parts))
 
             msg = await inter.followup.send(embed=embed, view=view)
@@ -3822,7 +3823,7 @@ async def leaderboards_cmd(interaction: discord.Interaction, song: str, instrume
         artist=s.artist,
         instrument=INSTR_DISPLAY_NAMES.get(resolved, resolved.capitalize()),
         year=s.year,
-        genre=s.genre,
+        genre=_preferred_genre_code(s),
         user=interaction.user,
         thumb_url=thumb,
     )
@@ -3835,7 +3836,11 @@ async def leaderboards_cmd(interaction: discord.Interaction, song: str, instrume
         description=desc
     )
     embed.set_thumbnail(url=thumb)
-    embed.set_footer(text=f"Artist: {s.artist} • Song ID: {s.song_id}")
+    gcode = _preferred_genre_code(s)
+    if gcode:
+        embed.set_footer(text=f"Artist: {s.artist} • Genre: {pretty_genre(gcode)} • Song ID: {s.song_id}")
+    else:
+        embed.set_footer(text=f"Artist: {s.artist} • Song ID: {s.song_id}")
 
     channel = interaction.channel
     posted_public = False
