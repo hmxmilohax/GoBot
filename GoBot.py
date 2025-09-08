@@ -2324,7 +2324,7 @@ class DailyVoteManager:
                 return "A REALLY short song"
 
         if category == "song":
-            return "A completely random song"
+            return f"**{s.name}** — {s.artist or '—'}"
 
         if category == "tempo":
             tempo = getattr(s, "anim_tempo", None)
@@ -2452,7 +2452,7 @@ class DailyVoteManager:
         lines = [
             "🗳️ **Daily Vote — Score Snipe**",
             f"**Instrument:** {pretty_instr}",
-            "React with **1–5** to vote. The actual songs are hidden until voting ends.",
+            "Vote Below for today's Score Snipe.\nWinner is revealed when voting ends.",
             "",
         ]
         if ts:
@@ -2473,7 +2473,7 @@ class DailyVoteManager:
         header_lines = [
             "🗳️ **Daily Vote — Score Snipe**",
             f"**Instrument:** {pretty_instr}",
-            "React with **1–5** to vote. The actual songs are hidden until voting ends."
+            "Vote Below for today's Score Snipe.\nWinner is revealed when voting ends."
         ]
 
         # Show 1–5 with their hints
@@ -2504,7 +2504,7 @@ class DailyVoteManager:
             if not options:
                 return False
 
-            ends_at = _utcnow() + timedelta(hours=1)
+            ends_at = _utcnow() + timedelta(hours=8)
             ch = await self._channel()
             if not ch:
                 return False
@@ -2530,8 +2530,8 @@ class DailyVoteManager:
 
             # 2) Send the actual poll in a NEW message (no role ping here).
             poll = discord.Poll(
-                question=f"Daily Vote — {INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())}",
-                duration=timedelta(hours=1),
+                question=f"Daily Vote - Score Snipe — {INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())}",
+                duration=timedelta(hours=8),
                 multiple=False,
             )
             for opt in options[:10]:
@@ -4083,7 +4083,7 @@ async def info_cmd(interaction: discord.Interaction):
 
     # daily format (kept)
     weekly_core = "Mon–Sat, not Wed: one battle daily cycling **Guitar, Bass, Drums, Vocals, Band** (no repeats until all used)"
-    weekly_pro  = "Wed & Sun: one **random Pro** battle each day **(Pro Guitar/Pro Bass/Bro Drums/Harmonies/Pro Keys)**, cycling without repeats"
+    weekly_pro  = "Wed & Sun: one **random Pro** battle **(Pro Guitar/Pro Bass/Bro Drums/Harmonies/Pro Keys)**, cycling without repeats"
 
     rules = [
         "**Official content + Rock Band Network** only for now",
@@ -4212,13 +4212,13 @@ async def unlink_cmd(interaction: discord.Interaction, name: str):
     description="Admin only: Manage Battles."
 )
 @app_commands.choices(action=[
-    app_commands.Choice(name="Enable",              value="enable"),
-    app_commands.Choice(name="Disable",             value="disable"),
-    app_commands.Choice(name="Status",              value="status"),
+    #app_commands.Choice(name="Enable",              value="enable"),
+    #app_commands.Choice(name="Disable",             value="disable"),
+    #app_commands.Choice(name="Status",              value="status"),
     app_commands.Choice(name="Run now",             value="run"),
     app_commands.Choice(name="Create battle",       value="create"),
     app_commands.Choice(name="Delete battle",       value="delete"),
-    app_commands.Choice(name="Test expired winners", value="test_expired"),
+    #app_commands.Choice(name="Test expired winners", value="test_expired"),
 ])
 @app_commands.describe(
     action="What to do",
