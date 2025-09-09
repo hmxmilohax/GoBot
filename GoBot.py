@@ -33,6 +33,7 @@ MANAGER_STATE_PATH = Path(__file__).resolve().parent / "battle_manager_state.jso
 AUTO_BATTLE_PERIOD_DAYS = 1
 BATTLE_DURATION_DAYS = 7
 SUBSCRIPTIONS_LOOP_SECONDS = 60
+JOINT_WINDOW_SECONDS = 600  # 10 minutes
 SUBS_KEY = "battle_subscriptions"   # { "<battle_id>": [user_id, ...] }
 TOPS_KEY = "battle_top_seen"        # { "<battle_id>": {"name": "...", "score": 123} }
 OVERTAKES_KEY = "battle_overtakes"  # NEW: { "<battle_id>": int }
@@ -49,7 +50,6 @@ CHAMPION_GRANTS_KEY = "champion_role_grants"  # [{user_id, role_id, battle_id, g
 
 WINNERS_BATCH_WINDOW_SECONDS = 300   # group endings within 5 minutes into one announcement
 RESULTS_GRACE_SECONDS = 5            # small buffer after expiry before fetching results
-NEXT_WEEK_GAP_SECONDS = 3600         # <-- wait 1 hour before next week's post
 
 STOPWORDS = {
     "the","and","a","of","to","in","on","for","feat","ft","vs","with","&"
@@ -1047,18 +1047,6 @@ def difficulty_label(instr_key: str, rank_val: Optional[int]) -> str:
             return DIFF_LEVELS[i]
     return DIFF_LEVELS[0]
 
-def difficulty_bucket(instr_key: str, rank_val: Optional[int]) -> Optional[int]:
-    """Return 0..5 bucket index for rank_val on instr_key (None if no part)."""
-    if not rank_val or rank_val <= 0:
-        return None
-    th = DIFF_THRESHOLDS.get(instr_key)
-    if not th:
-        return None
-    for i in range(len(th) - 1, -1, -1):
-        if rank_val >= th[i]:
-            return i
-    return 0
-
 def difficulty_bucket_index(instr_key: str, rank_val: Optional[int]) -> Optional[int]:
     """Return difficulty bucket index 0..5 from thresholds, or None if no part."""
     if not rank_val or rank_val <= 0:
@@ -1071,10 +1059,10 @@ def difficulty_bucket_index(instr_key: str, rank_val: Optional[int]) -> Optional
             return i
     return 0
 
-def _th_key(instr: str) -> str:
+def _threshold_key_for_instr(instr: str) -> str:
     return {"harmony": "vocals", "prodrums": "drums"}.get(instr, instr)
 
-def _rank(song: Song, instr: str) -> Optional[int]:
+def _rank_for_song_instr(song: Song, instr: str) -> Optional[int]:
     return (song.ranks or {}).get(_base_part(instr))
 
 def has_part(song: Song, instr_key: str) -> bool:
@@ -1174,13 +1162,14 @@ def _read_manager_state() -> dict:
     st.setdefault("vote_next_start_at", None)    # ISO time for next noon start (UTC)
     st.setdefault("daily_vote", None)            # active vote payload or None
     st.setdefault("daily_core_pool", [])  # rotates through INSTR_SET_WEEK (Mon–Fri)
-    st.setdefault("daily_pro_pool", [])   # rotates through PRO_ONE_PER_WEEK (Sat–Sun)
+    st.setdefault("daily_pro_pool", [])   # rotates through PRO_ONE_PER_WEEK (Wed/Sun)
     st.setdefault(SUBS_KEY, {})
     st.setdefault(TOPS_KEY, {})
     st.setdefault(OVERTAKES_KEY, {})
     st.setdefault("last_week_increment_at", None)
     st.setdefault(LINKS_KEY, {})  # NEW: { "<discord_user_id>": [display_name, ...] }
     st.setdefault(CHAMPION_GRANTS_KEY, [])
+    st.setdefault("joint_hold_until", None)
     if not isinstance(st[CHAMPION_GRANTS_KEY], list):
         st[CHAMPION_GRANTS_KEY] = []
 
@@ -1298,19 +1287,21 @@ class WeeklyBattleManager:
         return g
 
     async def _grant_champion_role(self, discord_user_id: int, battle_id: int, leader_name: str) -> bool:
-        g = await self._get_guild()
-        if not g:
+        guild = await self._get_guild()
+        if not guild:
             return False
-        role = g.get_role(CHAMPION_ROLE_ID)
+        role = guild.get_role(CHAMPION_ROLE_ID)
         # Idempotency: if an active grant already exists for this user/battle, don't re-add
         async with self.lock:
-            for g in self.state.setdefault(CHAMPION_GRANTS_KEY, []):
-                if int(g.get("user_id", 0)) == int(discord_user_id) and int(g.get("battle_id", 0)) == int(battle_id) and g.get("active"):
+            for rec in self.state.setdefault(CHAMPION_GRANTS_KEY, []):
+                if int(rec.get("user_id", 0)) == int(discord_user_id) \
+                   and int(rec.get("battle_id", 0)) == int(battle_id) \
+                   and rec.get("active"):
                     return True
         if not role:
             return False
         try:
-            member = await g.fetch_member(discord_user_id)
+            member = await guild.fetch_member(discord_user_id)
         except Exception:
             return False
         try:
@@ -1428,6 +1419,17 @@ class WeeklyBattleManager:
         await self.bot.wait_until_ready()
         while True:
             try:
+                hold_iso = self.state.get("joint_hold_until")
+                if hold_iso:
+                    hold_until = _from_iso(hold_iso)
+                    if hold_until and _utcnow() < hold_until:
+                        await asyncio.sleep(min(30, max(1, int((hold_until - _utcnow()).total_seconds()))))
+                        continue
+                    else:
+                        # hold expired; clear it
+                        async with self.lock:
+                            self.state["joint_hold_until"] = None
+                            _write_manager_state(self.state)
                 pending = self._pending_unannounced()
                 if not pending:
                     await asyncio.sleep(60)
@@ -1530,9 +1532,6 @@ class WeeklyBattleManager:
                 more = "…" if len(champ_names) > 3 else ""
                 champ_header = "# 🏆 " + ", ".join(champ_names) + " — Co-champions!"
 
-            # Table (band gets 15)
-            table = format_battle_rows(rows or [], max_n=pg_n)
-
             # Song details
             song = self._song_from_id(int(rec["song_id"]))
             song_title = song.name if song else f"Song ID {rec.get('song_id')}"
@@ -1540,8 +1539,8 @@ class WeeklyBattleManager:
             album_line = (song.album_name or "—") if song else "—"
             if song and song.year:
                 album_line = f"{album_line} ({song.year})"
-            rank_val = _rank(song, instr_key) if (song and instr_key) else None
-            diff_txt = difficulty_label(_th_key(instr_key or ""), rank_val) if (instr_key) else "—"
+            rank_val = _rank_for_song_instr(song, instr_key) if (song and instr_key) else None
+            diff_txt = difficulty_label(_threshold_key_for_instr(instr_key or ""), rank_val) if (instr_key) else "—"
 
             # Overtakes
             over_map: Dict[str, int] = self.state.get(OVERTAKES_KEY, {}) or {}
@@ -1776,8 +1775,8 @@ class WeeklyBattleManager:
             # Build weights
             items, weights = [], []
             for s in viable:
-                rank_val = _rank(s, instr)
-                b = difficulty_bucket_index(_th_key(instr), rank_val)
+                rank_val = _rank_for_song_instr(s, instr)
+                b = difficulty_bucket_index(_threshold_key_for_instr(instr), rank_val)
                 if b is None:
                     continue
 
@@ -1811,7 +1810,7 @@ class WeeklyBattleManager:
                 used_genres.add(pick.genre.lower())
 
             # Track used difficulty bucket
-            b_used = difficulty_bucket_index(_th_key(instr), _rank(pick, instr))
+            b_used = difficulty_bucket_index(_threshold_key_for_instr(instr), _rank_for_song_instr(pick, instr))
             if b_used is not None:
                 used_buckets[b_used] = used_buckets.get(b_used, 0) + 1
 
@@ -1910,8 +1909,8 @@ class WeeklyBattleManager:
             emoji = INSTR_EMOJI.get(instr_key, "🎵")
             if song:
                 thumb = await fetch_song_art_url(self.bot.http_session, song.slug)
-                rank_val = _rank(song, instr_key)
-                diff_txt = difficulty_label(_th_key(instr_key), rank_val)
+                rank_val = _rank_for_song_instr(song, instr_key)
+                diff_txt = difficulty_label(_threshold_key_for_instr(instr_key), rank_val)
                 summary_lines.append(
                     f"{emoji} **{INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())}** — "
                     f"**{song.name}** *by {song.artist}* • *{diff_txt}*"
@@ -1959,8 +1958,8 @@ class WeeklyBattleManager:
                 if song.year:
                     album_line = f"{album_line} ({song.year})"
                 author = getattr(song, "author", None) or "—"
-                rank_val = _rank(song, instr_key)
-                diff_txt = difficulty_label(_th_key(instr_key), rank_val)
+                rank_val = _rank_for_song_instr(song, instr_key)
+                diff_txt = difficulty_label(_threshold_key_for_instr(instr_key), rank_val)
 
                 # Row 1: Artist | Album  (+ pad)
                 e.add_field(name="Artist", value=artist, inline=True)
@@ -2083,7 +2082,7 @@ class WeeklyBattleManager:
             "flags": 0
         }
         headers = {
-            "Authorization": f"Bearer {get_api_key()}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
 
@@ -2135,17 +2134,8 @@ async def _can_send_polls(ch: discord.abc.Messageable) -> bool:
     except Exception:
         return False
 
-def _next_local_noon_utc(self, now: Optional[datetime] = None) -> datetime:
-        """Return the next 12:00 PM in America/Chicago as a UTC datetime."""
-        now = now or _utcnow()
-        local_now = now.astimezone(self._vote_tz)
-        target = local_now.replace(hour=12, minute=0, second=0, microsecond=0)
-        if target <= local_now:
-            target += timedelta(days=1)
-        return target.astimezone(timezone.utc)
-
 class DailyVoteManager:
-    """Posts a daily 1-hour vote with hidden hints, then creates a battle from the winner."""
+    """Posts a daily 8-hour vote with hidden hints, then creates a battle from the winner."""
     VOTE_KEY = "daily_vote"
 
     def __init__(self, bot: "LBClient", weekly: WeeklyBattleManager):
@@ -2164,6 +2154,15 @@ class DailyVoteManager:
     # ---- helpers ----
     def _vote(self) -> Optional[dict]:
         return self.weekly.state.get(self.VOTE_KEY) or None
+
+    def _next_local_noon_utc(self, now: Optional[datetime] = None) -> datetime:
+        """Return the next 12:00 PM in America/Chicago as a UTC datetime."""
+        now = now or _utcnow()
+        local_now = now.astimezone(self._vote_tz)
+        target = local_now.replace(hour=12, minute=0, second=0, microsecond=0)
+        if target <= local_now:
+            target += timedelta(days=1)
+        return target.astimezone(timezone.utc)
 
     async def _vote_loop(self):
         await self.bot.wait_until_ready()
@@ -2192,12 +2191,65 @@ class DailyVoteManager:
 
                 # Time to start?
                 if now >= due:
-                    ok = await self.start_vote_now()
-                    # Regardless of success, schedule the next noon so we don't spam
-                    st["vote_next_start_at"] = _to_iso(self._next_local_noon_utc(now + timedelta(seconds=5)))
-                    _write_manager_state(st)
+                    # --- Joint-post coordination (champions first, then vote) ---
+                    # If a winners announcement is within +/- 10 minutes, post both together.
+                    try:
+                        pending = self.weekly._pending_unannounced()  # sorted by expiry
+                        earliest_dt = None
+                        for rec in pending:
+                            dt = _from_iso(rec.get("expires_at"))
+                            if dt:
+                                earliest_dt = dt
+                                break
+                    except Exception:
+                        earliest_dt = None
 
-                await asyncio.sleep(30)
+                    no_active_vote = not self._vote()
+                    close_to_winners = (
+                        earliest_dt is not None and abs((earliest_dt - now).total_seconds()) <= JOINT_WINDOW_SECONDS
+                    )
+
+                    if no_active_vote and close_to_winners:
+                        # Hold the winners watcher so we can release both in order.
+                        joint_at = max(now, earliest_dt)
+                        st["joint_hold_until"] = _to_iso(joint_at + timedelta(seconds=RESULTS_GRACE_SECONDS))
+                        _write_manager_state(st)
+
+                        # Sleep until joint moment (bounded by the 10-min window)
+                        await asyncio.sleep(max(1, min(JOINT_WINDOW_SECONDS, int((joint_at - _utcnow()).total_seconds()))))
+
+                        # Recompute and batch any finished battles (same windowing you use elsewhere)
+                        cutoff = _utcnow() + timedelta(seconds=WINNERS_BATCH_WINDOW_SECONDS)
+                        finished: list[dict] = []
+                        for rec in self.weekly._pending_unannounced():
+                            dt = _from_iso(rec.get("expires_at"))
+                            if dt and dt <= cutoff and dt <= _utcnow():
+                                finished.append(rec)
+
+                        # 1) Champions
+                        if finished:
+                            await self.weekly._announce_winners(finished)
+
+                        # Clear the hold before starting the vote
+                        async with self.weekly.lock:
+                            st["joint_hold_until"] = None
+                            _write_manager_state(st)
+
+                        # 2) Then the vote
+                        await self.start_vote_now()
+
+                        # Schedule the next noon after this run
+                        st["vote_next_start_at"] = _to_iso(self._next_local_noon_utc(_utcnow() + timedelta(seconds=5)))
+                        _write_manager_state(st)
+
+                    else:
+                        # Normal path (no coordination needed)
+                        ok = await self.start_vote_now()
+                        st["vote_next_start_at"] = _to_iso(self._next_local_noon_utc(now + timedelta(seconds=5)))
+                        _write_manager_state(st)
+
+                    await asyncio.sleep(30)
+                    
             except Exception as e:
                 st = self.weekly.state
                 st["last_error"] = f"vote scheduler: {e!r}"
@@ -2288,8 +2340,8 @@ class DailyVoteManager:
         # Difficulty (localized, “A/An %s song on %s”)
         # Use your existing helpers to get tier and label.
         try:
-            tier = _rank(song, instr_key) or 0  # 0..?
-            diff_label = difficulty_label(_th_key(instr_key), tier)  # e.g., "Apprentice"
+            tier = _rank_for_song_instr(song, instr_key) or 0  # 0..?
+            diff_label = difficulty_label(_threshold_key_for_instr(instr_key), tier)  # e.g., "Apprentice"
             instr_name = INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())
 
             # Match DTA special-casing: tiers 1 and 6 use the "An %s..." key.
@@ -2328,8 +2380,8 @@ class DailyVoteManager:
     def _difficulty_hint(self, s, instr_key: str) -> str | None:
         """Localized-ish difficulty line: 'A <Tier> song on <Instrument>' with correct article."""
         try:
-            tier = _rank(s, instr_key) or 0
-            tier_name = difficulty_label(_th_key(instr_key), tier)  # your existing helper
+            tier = _rank_for_song_instr(s, instr_key) or 0
+            tier_name = difficulty_label(_threshold_key_for_instr(instr_key), tier)  # your existing helper
             instr_name = INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())
             if not tier_name:
                 return None
@@ -2345,7 +2397,7 @@ class DailyVoteManager:
             if isinstance(ms, (int, float)) and ms > 0:
                 if random.choice((True, False)):
                     minutes = max(1, int(round(ms / 60000.0)))
-                    unit = "minute" if minutes == 1 else "minutes"
+                    unit = "minute"
                     return f"A {minutes} {unit} long song"
                 else:
                     if ms >= 420_000:
@@ -2916,10 +2968,6 @@ class SubscriptionManager:
 
         limit = BAND_TOP_N if instr_key == "band" else TOP_N
 
-        # Table + header lines
-        desc = format_battle_rows(rows or [], max_n=limit)
-        title = f"🥇 Overtake Alert — {battle.get('title','(untitled)')}"
-
         # If it's a band battle and there's a tie for top score, list the names.
         if instr_key == "band" and new_top:
             top_score = new_top.get("score") if new_top else None  # <-- fix 'Non' -> None
@@ -2934,7 +2982,7 @@ class SubscriptionManager:
 
         # difficulty from the song's ranks for this instrument
         rank_val = (song.ranks or {}).get(instr_key) if (song and instr_key) else None
-        diff_txt = difficulty_label(_th_key(instr_key or ""), rank_val) if instr_key else "—"
+        diff_txt = difficulty_label(_threshold_key_for_instr(instr_key or ""), rank_val) if instr_key else "—"
 
         if song:
             artist = song.artist or "—"
@@ -3402,10 +3450,6 @@ class BattleListView(discord.ui.View):
         embed.add_field(name="Started", value=(f"<t:{starts_ts}:R>" if starts_ts else "—"), inline=True)
         embed.add_field(name="Ends",    value=(f"<t:{ends_ts}:R>"   if ends_ts   else "—"), inline=True)
 
-        # Footer (robust even if song isn't resolved)
-        footer_txt = f"Artist: {song.artist} • Song ID: {song.song_id}" if song else f"Song ID: {sid or 'Unknown'}"
-        embed.set_footer(text=footer_txt)
-
         try:
             import re as _re
             m = _re.search(r"Week\s+(\d+)", str(battle.get('title','')))
@@ -3666,41 +3710,6 @@ class SongSelectView(discord.ui.View):
         self.add_item(SongSelect(options, matches, instrument, interaction, callback_func))
         self.message: Optional[discord.Message] = None
 
-    def _refresh_buttons(self):
-        self.clear_items()
-        total_pages = max(1, len(self.battles))
-        self.add_item(BattlePrevButton(disabled=(self.page == 0)))
-        self.add_item(PageIndicator(label=f"{self.page + 1}/{total_pages}"))
-        self.add_item(BattleNextButton(disabled=(self.page >= total_pages - 1)))
-
-    async def build_embed(self) -> discord.Embed:
-        battle = self.battles[self.page]
-        bid = battle["battle_id"]
-        lb = self.leaderboards.get(bid)
-
-        if lb is None:
-            lb = await fetch_battle_leaderboard(bot.http_session, bid)
-            self.leaderboards[bid] = lb or []
-
-        desc = format_leaderboard_rows(lb or [], max_n=TOP_N)
-        embed = discord.Embed(title=f"Battle: {battle['title']}", description=desc)
-        embed.add_field(name="Description", value=battle.get("description", "No description"), inline=False)
-
-        # Format Discord live time tags
-        ts = self._to_unix(battle.get("starts_at"))
-        embed.add_field(name="Starts", value=(f"<t:{ts}:R>" if ts else "—"), inline=True)
-        embed.add_field(name="Ends", value=f"<t:{battle['expires_at']}:R>", inline=True)
-
-        self._refresh_buttons()
-        return embed
-
-    async def update(self, interaction: discord.Interaction):
-        if interaction.user != self.user:
-            await interaction.response.send_message("This battle view isn't yours.", ephemeral=True)
-            return
-        embed = await self.build_embed()
-        await interaction.response.edit_message(embed=embed, view=self)
-
     async def on_timeout(self):
         try:
             for item in self.children:
@@ -3739,39 +3748,6 @@ class BattleNextButton(discord.ui.Button):
         if view.page < len(view.battles) - 1:
             view.page += 1
         await view.update(interaction)
-
-class VoteButton(discord.ui.Button):
-    def __init__(self, manager: "DailyVoteManager", vote_id: str, idx: int):
-        super().__init__(
-            label=str(idx),
-            style=discord.ButtonStyle.primary,
-            custom_id=f"dailyvote:{vote_id}:{idx}"  # persistent across restarts
-        )
-        self.manager = manager
-        self.vote_id = vote_id
-        self.idx = idx
-
-    async def callback(self, interaction: discord.Interaction):
-        # defer early so we don't hit the 3s window
-        await interaction.response.defer(ephemeral=True, thinking=False)
-        ok, msg = await self.manager.register_vote(self.vote_id, interaction.user.id, self.idx)
-        try:
-            # Always try to update the originating message with the latest tallies
-            await self.manager.refresh_vote_message_from_interaction(interaction)
-        except Exception:
-            pass
-        if ok:
-            await interaction.followup.send(f"✅ Your vote for **#{self.idx}** is recorded.", ephemeral=True)
-        else:
-            await interaction.followup.send(f"⚠️ {msg}", ephemeral=True)
-
-
-class DailyVoteView(discord.ui.View):
-    """Persistent view so buttons work after bot restarts."""
-    def __init__(self, manager: "DailyVoteManager", vote_id: str):
-        super().__init__(timeout=None)  # persistent
-        for i in range(1, 6):
-            self.add_item(VoteButton(manager, vote_id, i))
 
 class SongSelect(discord.ui.Select):
     def __init__(self, options: List[discord.SelectOption], matches: List[Song], instrument: str, interaction: discord.Interaction, callback_func):
