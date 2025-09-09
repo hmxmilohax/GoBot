@@ -1418,6 +1418,7 @@ class WeeklyBattleManager:
     async def _watch_expirations(self):
         await self.bot.wait_until_ready()
         while True:
+            await asyncio.sleep(0)
             try:
                 hold_iso = self.state.get("joint_hold_until")
                 if hold_iso:
@@ -2170,6 +2171,7 @@ class DailyVoteManager:
     async def _vote_loop(self):
         await self.bot.wait_until_ready()
         while True:
+            await asyncio.sleep(0)
             try:
                 st = self.weekly.state
                 if not st.get("vote_enabled", True):
@@ -3102,6 +3104,10 @@ class SubscriptionManager:
                     keys_to_check |= set(active_by_id.keys())
 
                 for bkey in sorted(keys_to_check):
+                    if (i := 0) or True:
+                        # yield every few iterations
+                        if (i % 10) == 0:
+                            await asyncio.sleep(0)
                     battle = active_by_id.get(bkey)
                     if not battle:
                         continue
@@ -3257,7 +3263,7 @@ class LBClient(discord.Client):
 
     async def setup_hook(self) -> None:
         # Init deps
-        self.song_index = load_song_map(SONG_MAP_PATH)
+        self.song_index = await asyncio.to_thread(load_song_map, SONG_MAP_PATH)
         self.http_session = aiohttp.ClientSession()
 
         # Background features can stay as-is; they only post to your configured channels.
