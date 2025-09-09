@@ -2177,10 +2177,11 @@ class DailyVoteManager:
 
                 # If a vote is already active, do nothing.
                 active = st.get(self.VOTE_KEY) or None
-                active_ends = _from_iso(active.get("ends_at")) if active else None
-                if active_ends and now < active_ends:
-                    await asyncio.sleep(30)
-                    continue
+                if active:
+                    ends = _from_iso(active.get("ends_at"))
+                    if ends and _utcnow() >= ends:
+                        await self._finalize_vote()
+                        continue
 
                 # Arm 'vote_next_start_at' if missing
                 due = _from_iso(st.get("vote_next_start_at"))
@@ -2249,7 +2250,7 @@ class DailyVoteManager:
                         _write_manager_state(st)
 
                     await asyncio.sleep(30)
-                    
+
             except Exception as e:
                 st = self.weekly.state
                 st["last_error"] = f"vote scheduler: {e!r}"
