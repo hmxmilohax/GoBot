@@ -2153,7 +2153,10 @@ class DailyVoteManager:
 
     # ---- helpers ----
     def _vote(self) -> Optional[dict]:
-        return self.weekly.state.get(self.VOTE_KEY) or None
+        v = self.weekly.state.get(self.VOTE_KEY)
+        if isinstance(v, dict) and "ends_at" in v:
+            return v
+        return None
 
     def _next_local_noon_utc(self, now: Optional[datetime] = None) -> datetime:
         """Return the next 12:00 PM in America/Chicago as a UTC datetime."""
@@ -2176,12 +2179,15 @@ class DailyVoteManager:
                 now = _utcnow()
 
                 # If a vote is already active, do nothing.
-                active = st.get(self.VOTE_KEY) or None
+                active = self._vote()  # returns a dict or None
                 if active:
                     ends = _from_iso(active.get("ends_at"))
                     if ends and _utcnow() >= ends:
                         await self._finalize_vote()
                         continue
+                    # Still active → just sleep & loop; don't try to schedule a new vote
+                    await asyncio.sleep(30)
+                    continue
 
                 # Arm 'vote_next_start_at' if missing
                 due = _from_iso(st.get("vote_next_start_at"))
