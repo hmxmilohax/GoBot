@@ -2777,8 +2777,8 @@ class DailyVoteManager:
                 await self.weekly.post_announcement([rec], increment_week=False)
 
         # Clear vote state
-        async with self.lock:
-            self.weekly.state[self.VOTE_KEY] = None
+        async with self.weekly.lock:
+            self.weekly.state.setdefault("created_battles", []).append(rec)
             _write_manager_state(self.weekly.state)
 
 class SubscriptionManager:
@@ -4276,7 +4276,7 @@ async def unlink_cmd(interaction: discord.Interaction, name: str):
     app_commands.Choice(name="Run now",             value="run"),
     app_commands.Choice(name="Create battle",       value="create"),
     app_commands.Choice(name="Delete battle",       value="delete"),
-    #app_commands.Choice(name="Test expired winners", value="test_expired"),
+    app_commands.Choice(name="Test expired winners", value="test_expired"),
 ])
 @app_commands.describe(
     action="What to do",
