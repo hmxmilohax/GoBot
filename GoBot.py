@@ -2183,6 +2183,10 @@ class DailyVoteManager:
                 # If a vote is already active, do nothing.
                 active = self._vote()  # returns a dict or None
                 if active:
+                    # If another task already marked it finalized, just idle.
+                    if active.get("finalized_at"):
+                        await asyncio.sleep(30)
+                        continue
                     ends = _from_iso(active.get("ends_at"))
                     if ends and _utcnow() >= ends:
                         await self._finalize_vote()
@@ -2629,6 +2633,7 @@ class DailyVoteManager:
                 "channel_id": ch.id,
                 "announce_message_id": None,
                 "poll_message_id": None,
+                "finalized_at": None,
             }
 
             # 1) Send the announcement embed that HIDES the options and pings the role.
@@ -2684,13 +2689,27 @@ class DailyVoteManager:
         await self._finalize_vote()
 
     async def _finalize_vote(self):
+        # Grab + mark finalized immediately so other loops won't re-enter.
         async with self.lock:
             v = self._vote()
             if not v:
                 return
+            if v.get("finalized_at"):
+                return  # already finalized by a racing caller
+            v["finalized_at"] = _to_iso(_utcnow())
+            # persist the flag so _vote_loop sees it right away
+            self.weekly.state[self.VOTE_KEY] = v
+            _write_manager_state(self.weekly.state)
 
         ch = await self._channel()
         if not ch:
+            # Channel missing; don't spam. Leave it finalized and clear the vote.
+            async with self.weekly.lock:
+                self.weekly.state[self.VOTE_KEY] = None
+                _write_manager_state(self.weekly.state)
+            if self._finalize_task and not self._finalize_task.done():
+                self._finalize_task.cancel()
+                self._finalize_task = None
             return
 
         poll_msg_id = v.get("poll_message_id") or v.get("message_id")  # back-compat
@@ -2767,6 +2786,7 @@ class DailyVoteManager:
                 pass
 
         # Create the weekly battle from the winning song
+        rec = None
         if song and has_part(song, instr_key):
             rec = await self.weekly._create_one_battle(
                 song=song,
@@ -2776,10 +2796,17 @@ class DailyVoteManager:
             if rec:
                 await self.weekly.post_announcement([rec], increment_week=False)
 
-        # Clear vote state
+        # Clear vote state (and append created battle once)
         async with self.weekly.lock:
-            self.weekly.state.setdefault("created_battles", []).append(rec)
+            self.weekly.state[self.VOTE_KEY] = None
+            if rec:
+                self.weekly.state.setdefault("created_battles", []).append(rec)
             _write_manager_state(self.weekly.state)
+
+        # Stop the timer task if it exists
+        if self._finalize_task and not self._finalize_task.done():
+            self._finalize_task.cancel()
+            self._finalize_task = None
 
 class SubscriptionManager:
     """Tracks battle subscriptions and sends DM alerts when 1st place changes hands."""
