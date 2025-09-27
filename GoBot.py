@@ -3821,6 +3821,94 @@ async def leaderboards_cmd(interaction: discord.Interaction, song: str, instrume
         await interaction.followup.send(f"Unknown instrument '{instrument}'. Try one of: {valid}.")
         return
 
+    role_id = INSTR_ROLE_IDS[resolved]
+
+    # --- NEW: numeric fast-path (treat as song_id and bypass lookup) ---
+    q = (song or "").strip()
+    if _is_numeric(q):
+        sid = int(q)
+
+        assert bot.http_session is not None
+        rows = await fetch_leaderboards(bot.http_session, sid, role_id)
+        if rows is None:
+            await interaction.followup.send("No leaderboard data returned.")
+            return
+
+        # Try to resolve from local map for nicer metadata; gracefully degrade if missing
+        s = bot.song_index.by_id.get(sid) if bot.song_index else None
+        title_txt = s.name if s else f"ID {sid}"
+        artist_txt = (s.artist if s and s.artist else "—")
+        year_val = s.year if s else None
+        genre_code = _preferred_genre_code(s) if s else None
+
+        # Thumbnail
+        if s:
+            thumb = await fetch_song_art_url(bot.http_session, s.slug)
+        else:
+            thumb = DEFAULT_SONG_ART
+
+        view = LeaderboardView(
+            all_rows=rows,
+            page_size=TOP_N,
+            song_title=title_txt,
+            artist=artist_txt,
+            instrument=INSTR_DISPLAY_NAMES.get(resolved, resolved.capitalize()),
+            year=year_val,
+            genre=genre_code,
+            user=interaction.user,
+            thumb_url=thumb,
+        )
+
+        desc = format_leaderboard_rows(rows, start=0, max_n=TOP_N)
+        embed = discord.Embed(
+            title=f"Leaderboards — {title_txt} — {INSTR_DISPLAY_NAMES.get(resolved, resolved.capitalize())}",
+            description=desc
+        )
+        embed.set_thumbnail(url=thumb)
+
+        footer_parts = [f"Artist: {artist_txt}"]
+        if year_val:
+            footer_parts.append(f"Year: {year_val}")
+        if genre_code:
+            footer_parts.append(f"Genre: {pretty_genre(genre_code)}")
+        footer_parts.append(f"Song ID: {sid}")
+        embed.set_footer(text=" • ".join(footer_parts))
+
+        # Try to post publicly; fall back to DM if needed (same behavior as before)
+        channel = interaction.channel
+        posted_public = False
+        msg_obj = None
+        try:
+            if isinstance(channel, (discord.TextChannel, discord.Thread)):
+                me = interaction.guild.me if interaction.guild else None
+                if me is not None:
+                    perms = channel.permissions_for(me)
+                    can_send = perms.send_messages and (not isinstance(channel, discord.Thread) or perms.send_messages_in_threads)
+                    can_embed = perms.embed_links
+                    if can_send and can_embed:
+                        msg_obj = await channel.send(embed=embed, view=view)
+                        view.message = msg_obj
+                        posted_public = True
+        except Forbidden:
+            posted_public = False
+
+        if posted_public:
+            try:
+                await interaction.delete_original_response()
+            except Exception:
+                pass
+            return
+        else:
+            try:
+                msg_obj = await interaction.user.send("Here's your leaderboard result:", embed=embed, view=view)
+                view.message = msg_obj
+                await interaction.followup.send("Couldn't post in channel, so I DMed you instead.", ephemeral=True)
+            except discord.Forbidden:
+                await interaction.followup.send("I couldn't post in the channel or DM you. Please check my permissions.")
+        return
+    # --- end numeric fast-path ---
+
+    # Existing name/slug search flow (unchanged except for a tiny refactor using role_id above)
     candidates = bot.song_index.find_all(song)
     if not candidates:
         await interaction.followup.send(f"No song match for: {song}")
@@ -3834,8 +3922,8 @@ async def leaderboards_cmd(interaction: discord.Interaction, song: str, instrume
                 await inter.followup.send("Invalid instrument.", ephemeral=True)
                 return
 
-            role_id = INSTR_ROLE_IDS[resolved_instr]
-            rows = await fetch_leaderboards(bot.http_session, song_obj.song_id, role_id)
+            role_id_inner = INSTR_ROLE_IDS[resolved_instr]
+            rows = await fetch_leaderboards(bot.http_session, song_obj.song_id, role_id_inner)
             if rows is None:
                 await inter.followup.send("No leaderboard data returned.")
                 return
@@ -3870,9 +3958,7 @@ async def leaderboards_cmd(interaction: discord.Interaction, song: str, instrume
 
             msg = await inter.followup.send(embed=embed, view=view)
             view.message = msg
-            # the message object is created by followup; if you need it later, capture the return value
 
-        # Pass the *resolved* instrument into the select view
         view = SongSelectView(candidates, resolved, interaction, continue_leaderboard)
         msg = await interaction.followup.send(
             f"Multiple songs matched your query for '{song}'. Please select one:",
@@ -3880,12 +3966,8 @@ async def leaderboards_cmd(interaction: discord.Interaction, song: str, instrume
         )
         view.message = msg
         return
-
     else:
         s = candidates[0]
-
-
-    role_id = INSTR_ROLE_IDS[resolved]
 
     assert bot.http_session is not None
     rows = await fetch_leaderboards(bot.http_session, s.song_id, role_id)
@@ -3895,7 +3977,6 @@ async def leaderboards_cmd(interaction: discord.Interaction, song: str, instrume
 
     thumb = await fetch_song_art_url(bot.http_session, s.slug)
 
-    # build the view first (so page_size is known)
     view = LeaderboardView(
         all_rows=rows,
         page_size=TOP_N,
@@ -3924,8 +4005,6 @@ async def leaderboards_cmd(interaction: discord.Interaction, song: str, instrume
 
     channel = interaction.channel
     posted_public = False
-
-    # Try to post publicly if we have permission
     msg_obj = None
     try:
         if isinstance(channel, (discord.TextChannel, discord.Thread)):
@@ -3948,7 +4027,6 @@ async def leaderboards_cmd(interaction: discord.Interaction, song: str, instrume
             pass
         return
     else:
-        # Fallback: still post leaderboard publicly in DMs or last-resort context
         try:
             msg_obj = await interaction.user.send("Here's your leaderboard result:", embed=embed, view=view)
             view.message = msg_obj
