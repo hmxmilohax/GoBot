@@ -451,7 +451,7 @@ def loc(key: str, *args):
 # Source policy
 EXCLUDED_SOURCES = {"fnfestival", "beatles"}
 UGC_DOWNWEIGHT_SOURCES = {"ugc1", "ugc2"}
-UGC_WEIGHT_MULTIPLIER = 0.4
+UGC_WEIGHT_MULTIPLIER = 0.3
 
 def get_api_key() -> str:
     config = configparser.ConfigParser()
@@ -650,17 +650,36 @@ def _to_unix_ts(dt: datetime) -> int:
 def _base_part(instr_key: str) -> str:
     return _ALIAS_TO_BASE.get(instr_key, instr_key)
 
+
 def _as_dt(v) -> Optional[datetime]:
-    """Accepts epoch int/float, digit string, or ISO8601 → timezone-aware UTC datetime."""
-    if isinstance(v, (int, float)):
-        return datetime.fromtimestamp(int(v), tz=timezone.utc)
-    if isinstance(v, str):
-        s = v.strip()
-        if s.isdigit():
-            return datetime.utcfromtimestamp(int(s)).replace(tzinfo=timezone.utc)
-        return _from_iso(s)
+    """Accepts epoch int/float/str or ISO string; returns aware UTC datetime or None."""
+    if v is None:
+        return None
+    try:
+        if isinstance(v, (int, float)):
+            return datetime.fromtimestamp(float(v), tz=timezone.utc)
+        if isinstance(v, str):
+            s = v.strip()
+            # allow floats and signed ints
+            try:
+                return datetime.fromtimestamp(float(s), tz=timezone.utc)
+            except ValueError:
+                return _from_iso(s)
+    except Exception:
+        return None
     return None
 
+
+def _parse_week_from_title(title: Optional[str]) -> Optional[int]:
+    if not title:
+        return None
+    m = re.search(r"\bWeek\s+(\d+)\b", title, flags=re.IGNORECASE)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
 def _as_int(v) -> Optional[int]:
     try:
         return int(str(v).strip())
@@ -1262,6 +1281,7 @@ class WeeklyBattleManager:
     def __init__(self, bot: "LBClient"):
         self.bot = bot
         self.state = _read_manager_state()
+        self._bootstrap_weeks()
         try:
             cur = int(self.state.get("songs_per_run") or 0)
         except Exception:
@@ -1370,6 +1390,106 @@ class WeeklyBattleManager:
                     self.state["last_error"] = f"champ role watcher: {e!r}"
                     _write_manager_state(self.state)
             await asyncio.sleep(60)
+
+    def _infer_week1_start(self) -> Optional[datetime]:
+        """Infer the UTC datetime that started Week 1 from archived battles."""
+        recs = list(self.state.get("created_battles") or [])
+        if not recs:
+            return None
+
+        # 1) If any record explicitly says week == 1, take the earliest created_at among them
+        wk1_candidates = []
+        for r in recs:
+            try:
+                w = int(r.get("week")) if r.get("week") is not None else None
+            except Exception:
+                w = None
+            if w == 1:
+                dt = _as_dt(r.get("created_at") or r.get("starts_at"))
+                if dt:
+                    wk1_candidates.append(dt)
+        if wk1_candidates:
+            return min(wk1_candidates)
+
+        # 2) Parse "Week N" from titles; choose the smallest N and back-compute Week 1
+        parsed = []
+        for r in recs:
+            w = _parse_week_from_title(r.get("title"))
+            if w and w >= 1:
+                dt = _as_dt(r.get("created_at") or r.get("starts_at"))
+                if dt:
+                    parsed.append((w, dt))
+        if parsed:
+            # Use the oldest record among the smallest week number encountered
+            min_week = min(w for (w, _) in parsed)
+            # choose earliest created_at among that min_week
+            min_week_dates = [dt for (w, dt) in parsed if w == min_week]
+            anchor = min(min_week_dates)
+            # Week 1 start = anchor - (min_week - 1) * 7 days
+            return anchor - timedelta(days=7 * (min_week - 1))
+
+        # 3) Fallback: earliest created battle time is the start of Week 1
+        dts = []
+        for r in recs:
+            dt = _as_dt(r.get("created_at") or r.get("starts_at"))
+            if dt:
+                dts.append(dt)
+        return min(dts) if dts else None
+
+    def _persist_week1_if_missing(self) -> None:
+        """Ensure state['week1_started_at'] exists."""
+        if self.state.get("week1_started_at"):
+            return
+        wk1 = self._infer_week1_start()
+        if wk1 is None:
+            # If we truly have no data, seed week1 to 'now' so week=1 until history exists
+            wk1 = _utcnow()
+        self.state["week1_started_at"] = _to_iso(wk1)
+        _write_manager_state(self.state)
+
+    def week_for_datetime(self, dt: datetime) -> int:
+        """Return week number for an arbitrary datetime, based on week1_started_at (>=1)."""
+        self._persist_week1_if_missing()
+        wk1 = _from_iso(self.state.get("week1_started_at"))
+        if not wk1:
+            wk1 = _utcnow()  # safety
+        # floor division by 7 days
+        delta_days = (dt - wk1).days
+        w = 1 + max(0, delta_days // 7)
+        return w
+
+    def current_week(self, now: Optional[datetime] = None) -> int:
+        """Compute the *current* week and keep state['week'] in sync."""
+        now = now or _utcnow()
+        w = self.week_for_datetime(now)
+        # keep state in sync (idempotent)
+        try:
+            cur = int(self.state.get("week") or 0)
+        except Exception:
+            cur = 0
+        if cur != w:
+            self.state["week"] = w
+            _write_manager_state(self.state)
+        return w
+
+    def _reconcile_created_battles_weeks(self) -> None:
+        """Fill missing rec['week'] from created_at so history is consistent."""
+        changed = False
+        recs = self.state.get("created_battles") or []
+        for r in recs:
+            if r.get("week") is None:
+                dt = _as_dt(r.get("created_at") or r.get("starts_at"))
+                if dt:
+                    r["week"] = self.week_for_datetime(dt)
+                    changed = True
+        if changed:
+            _write_manager_state(self.state)
+
+    def _bootstrap_weeks(self) -> None:
+        """One-time boot sequence to set baseline + reconcile and sync state['week']."""
+        self._persist_week1_if_missing()
+        self._reconcile_created_battles_weeks()
+        self.current_week(_utcnow())  # sync state["week"]
 
     def _pending_unannounced(self) -> list[dict]:
         now = _utcnow()
@@ -1858,16 +1978,19 @@ class WeeklyBattleManager:
             nxt = now + timedelta(days=AUTO_BATTLE_PERIOD_DAYS)
         return nxt
 
-    async def post_announcement(self, recs: list[dict], increment_week: bool):
-        # Decide week number; persist if changed
-        async with self.lock:
-            week = int(self.state.get("week") or 0)
-            if week == 0:
-                week = 1
-            elif increment_week:
-                week += 1
-            self.state["week"] = week
-            _write_manager_state(self.state)
+    async def post_announcement(self, recs: list[dict], increment_week: bool = False):
+        # --- UPDATED: ignore increment_week; always compute from clock + baseline ---
+        week = self.current_week(_utcnow())
+
+        # Also stamp each rec's week if missing (helps future retro checks)
+        changed = False
+        for r in recs:
+            if r.get("week") is None:
+                r["week"] = week
+                changed = True
+        if changed:
+            async with self.lock:
+                _write_manager_state(self.state)
 
         await self._post_to_channel(week, recs)
 
@@ -2019,14 +2142,8 @@ class WeeklyBattleManager:
 
     async def run_once(self, count: Optional[int] = None) -> list[dict]:
         now = _utcnow()
-        if now.weekday() == 4:  # Friday
-            last_inc = _from_iso(self.state.get("last_week_increment_at"))
-            if not last_inc or last_inc.date() != now.date():
-                async with self.lock:
-                    cur = int(self.state.get("week") or 0)
-                    self.state["week"] = cur + 1 if cur >= 1 else 1  # start at 1 if unset
-                    self.state["last_week_increment_at"] = _to_iso(now)
-                    _write_manager_state(self.state)
+
+        live_week = self.current_week(now)
 
         n = max(1, int(count or 1))
         created: list[dict] = []
@@ -2035,7 +2152,7 @@ class WeeklyBattleManager:
             if not pick:
                 break
             song, instr = pick
-            rec = await self._create_one_battle(song=song, instr_key=instr, week_num=int(self.state.get("week") or 1))
+            rec = await self._create_one_battle(song=song, instr_key=instr, week_num=live_week)
             if rec:
                 created.append(rec)
 
@@ -2791,7 +2908,7 @@ class DailyVoteManager:
             rec = await self.weekly._create_one_battle(
                 song=song,
                 instr_key=instr_key,
-                week_num=int(self.weekly.state.get("week") or 1),
+                week_num=self.weekly.current_week(_utcnow()),  # UPDATED
             )
             if rec:
                 await self.weekly.post_announcement([rec], increment_week=False)
@@ -3131,10 +3248,8 @@ class SubscriptionManager:
                     keys_to_check |= set(active_by_id.keys())
 
                 for bkey in sorted(keys_to_check):
-                    if (i := 0) or True:
-                        # yield every few iterations
-                        if (i % 10) == 0:
-                            await asyncio.sleep(0)
+                    # yield occasionally to avoid starving the loop
+                    await asyncio.sleep(0)
                     battle = active_by_id.get(bkey)
                     if not battle:
                         continue
@@ -3474,10 +3589,12 @@ class BattleListView(discord.ui.View):
             ]))
 
         description = "\n\n".join(parts)
-        embed = discord.Embed(
-            title=f"Battle: {battle.get('title','(untitled)')}",
-            description=description
-        )
+        # ----- Week parsing (replace the ad-hoc regex block) -----
+        wk = _parse_week_from_title(str(battle.get("title", "")))
+        base_title = str(battle.get("title", "(untitled)"))
+        title_text = f"Battle (Week {wk}): {base_title}" if wk else f"Battle: {base_title}"
+
+        embed = discord.Embed(title=title_text, description=description)
 
         # Thumbnail
         thumb = await self._thumb_for_battle(battle)
