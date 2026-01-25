@@ -6,6 +6,8 @@ set -eu
 : "${BRANCH:=main}"
 
 mkdir -p "$APP_DIR"
+mkdir -p /config
+
 git config --global --add safe.directory "$APP_DIR" || true
 
 if [ ! -d "$APP_DIR/.git" ]; then
@@ -25,14 +27,11 @@ if [ ! -f /config/config.ini ]; then
 fi
 cp /config/config.ini "$APP_DIR/config.ini"
 
-# battle_manager_state.json (persisted)
-if [ -f /config/battle_manager_state.json ]; then
-  cp /config/battle_manager_state.json "$APP_DIR/battle_manager_state.json"
-else
-  # If it doesn't exist yet, create an empty json so the bot can start
-  echo "{}" > "$APP_DIR/battle_manager_state.json"
-  cp "$APP_DIR/battle_manager_state.json" /config/battle_manager_state.json || true
+# battle_manager_state.json (persisted via symlink)
+if [ ! -f /config/battle_manager_state.json ]; then
+  echo "{}" > /config/battle_manager_state.json
 fi
+ln -sf /config/battle_manager_state.json "$APP_DIR/battle_manager_state.json"
 
 cd "$APP_DIR"
 exec python GoBot.py
