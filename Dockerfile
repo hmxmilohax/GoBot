@@ -1,21 +1,16 @@
 FROM python:3.12-slim
 
-WORKDIR /opt
+WORKDIR /app
 
-# git for pulling, tzdata so ZoneInfo/TZ work properly
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git ca-certificates tzdata \
+    tzdata \
   && rm -rf /var/lib/apt/lists/*
 
-# Bot deps (discord + aiohttp)
 RUN pip install --no-cache-dir -U discord.py aiohttp
 
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY . .
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
 
-ENV REPO_URL="https://github.com/hmxmilohax/GoBot"
-ENV APP_DIR="/opt/gobot"
-ENV BRANCH="main"
-
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["/docker-entrypoint.sh"]
