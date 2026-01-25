@@ -1,0 +1,13 @@
+services:
+  gobot:
+    build: .
+    container_name: gobot
+    restart: unless-stopped
+    environment:
+      - TZ=America/Chicago
+    volumes:
+      - gobot_repo:/opt/gobot
+      - ${HOME}/configs/gobot/config.ini:/config/config.ini:ro
+
+volumes:
+  gobot_repo:
