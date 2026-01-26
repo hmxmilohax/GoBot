@@ -8,12 +8,5 @@ if [ ! -f /config/config.ini ]; then
 fi
 cp /config/config.ini /app/config.ini
 
-# Persist state file directly on host via bind mount
-mkdir -p /data
-if [ ! -f /data/battle_manager_state.json ]; then
-  echo "{}" > /data/battle_manager_state.json
-fi
-ln -sf /data/battle_manager_state.json /app/battle_manager_state.json
-
 cd /app
 exec python GoBot.py
