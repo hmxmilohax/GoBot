@@ -6,9 +6,4 @@ services:
     environment:
       - TZ=America/Chicago
     volumes:
-      - gobot_repo:/opt/gobot
-      - ${HOME}/configs/gobot/config.ini:/config/config.ini:ro
-      - ${HOME}/configs/gobot/battle_manager_state.json:/app/battle_manager_state.json:rw
-
-volumes:
-  gobot_repo:
+      - ${HOME}/configs/gobot:/config

@@ -29,7 +29,7 @@ BATTLES_URL = "https://gocentral-service.rbenhanced.rocks/battles"
 BATTLE_LB_URL = "https://gocentral-service.rbenhanced.rocks/leaderboards/battle"
 TOP_N = 10
 BAND_TOP_N = 15
-MANAGER_STATE_PATH = Path(__file__).resolve().parent / "battle_manager_state.json"
+MANAGER_STATE_PATH = Path("/config/battle_manager_state.json")
 AUTO_BATTLE_PERIOD_DAYS = 1
 BATTLE_DURATION_DAYS = 7
 SUBSCRIPTIONS_LOOP_SECONDS = 60
@@ -1273,9 +1273,11 @@ def _winner_payload(row: Optional[dict]) -> Optional[dict]:
     }
 
 def _write_manager_state(state: dict) -> None:
-    tmp = MANAGER_STATE_PATH.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(MANAGER_STATE_PATH)
+    MANAGER_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(MANAGER_STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2, sort_keys=True)
+        f.flush()
+        os.fsync(f.fileno())
 
 class WeeklyBattleManager:
     def __init__(self, bot: "LBClient"):
