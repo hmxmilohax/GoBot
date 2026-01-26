@@ -8,7 +8,7 @@ services:
     volumes:
       - gobot_repo:/opt/gobot
       - ${HOME}/configs/gobot/config.ini:/config/config.ini:ro
-      - ${HOME}/configs/gobot/battle_manager_state.json:/config/battle_manager_state.json:rw
+      - ${HOME}/configs/gobot/battle_manager_state.json:/data/battle_manager_state.json:rw
 
 volumes:
   gobot_repo:
