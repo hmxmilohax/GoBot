@@ -3994,7 +3994,12 @@ async def leaderboards_cmd(interaction: discord.Interaction, song: str, instrume
         sid = int(q)
 
         assert bot.http_session is not None
-        rows_raw = await fetch_leaderboards(session, song_id, role_id) or []
+        http = interaction.client.http_session
+        if not http:
+            await interaction.response.send_message("HTTP session not ready yet. Try again in a moment.", ephemeral=True)
+            return
+
+        rows_raw = await fetch_leaderboards(http, song_id, role_id) or []
         rows, ignored_ct = _filter_ignored_rows(rows_raw)
         if rows is None:
             await interaction.followup.send("No leaderboard data returned.")
