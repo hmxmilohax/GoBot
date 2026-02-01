@@ -1118,14 +1118,22 @@ def resolve_instrument(instr_raw: str) -> Optional[str]:
     return None
 
 async def fetch_battle_top_winner(session: aiohttp.ClientSession, battle_id: int) -> Optional[dict]:
-    rows = await fetch_battle_leaderboard(session, battle_id, page_size=1)
-    if not rows:
+    # Fetch enough rows so we can skip ignored players and still find a legit winner.
+    rows_raw = await fetch_battle_leaderboard(session, battle_id, page_size=max(TOP_N, 25))
+    if not rows_raw:
         return None
+
+    rows, ignored_ct = _filter_ignored_rows(rows_raw)
+    if not rows:
+        # Everyone in the table is ignored -> no eligible winner
+        return {"_no_eligible": True, "_ignored_count": ignored_ct}
+
     r = rows[0]
     r["_score_str"] = f"{int(r.get('score', 0)):,.0f}" if isinstance(r.get('score'), (int, float)) else "?"
-    # strip platform/fluff tags like [360] [PS3] [RPCS3] [WII] from display
     r["_name"] = _strip_platform_tags(str(r.get("name", "Unknown")))
+    r["_ignored_count"] = ignored_ct
     return r
+
 
 async def fetch_battles(session: aiohttp.ClientSession) -> Optional[List[dict]]:
     try:
@@ -1271,6 +1279,37 @@ def _winner_payload(row: Optional[dict]) -> Optional[dict]:
         "score": int(score) if isinstance(score, (int, float)) else None,
         "recorded_at": _to_iso(_utcnow()),
     }
+
+def _load_ignored_players() -> set[str]:
+    cfg = configparser.ConfigParser()
+    cfg.read("config.ini")
+
+    raw = cfg.get("moderation", "ignored_players", fallback="") or ""
+    # allow comma/newline separated
+    parts = re.split(r"[,\n]+", raw)
+    return {_norm_link_name(p) for p in parts if p and p.strip()}
+
+IGNORED_PLAYERS = _load_ignored_players()
+
+def _is_ignored_player(name: str) -> bool:
+    if not name:
+        return False
+    return _norm_link_name(name) in IGNORED_PLAYERS
+
+def _filter_ignored_rows(rows: list[dict]) -> tuple[list[dict], int]:
+    """Return (eligible_rows, ignored_count)."""
+    if not rows:
+        return [], 0
+    out = []
+    ignored = 0
+    for r in rows:
+        nm = str(r.get("name", "") or "")
+        if _is_ignored_player(nm):
+            ignored += 1
+            continue
+        out.append(r)
+    return out, ignored
+
 
 def _write_manager_state(state: dict) -> None:
     MANAGER_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -1624,7 +1663,8 @@ class WeeklyBattleManager:
 
             # fetch more rows for band
             pg_n = BAND_TOP_N if is_band else 5
-            rows = await fetch_battle_leaderboard(self.bot.http_session, bid, page_size=pg_n) or []
+            rows_raw = await fetch_battle_leaderboard(self.bot.http_session, bid, page_size=pg_n) or []
+            rows, ignored_ct = _filter_ignored_rows(rows_raw)
             top = rows[0] if rows else None
 
             # Determine champion name(s)
@@ -1644,8 +1684,10 @@ class WeeklyBattleManager:
                                 champ_names.append(dn)
 
             # --- Header line ---
-            if not champ_names:
+            if not rows_raw:
                 champ_header = "### 🏆 No entries" if is_band else "# 🏆 No entries"
+            elif not rows:
+                champ_header = "### 🏆 No eligible entries" if is_band else "# 🏆 No eligible entries"
             elif is_band:
                 # band: never truncate; smaller heading
                 champ_header = "### 🏆 " + ", ".join(champ_names)
@@ -1772,11 +1814,11 @@ class WeeklyBattleManager:
             else:
                 instr_key = None
             if instr_key == "band":
-                rows = await fetch_battle_leaderboard(self.bot.http_session, bid, page_size=TOP_N) or []
+                rows_raw = await fetch_battle_leaderboard(self.bot.http_session, bid, page_size=TOP_N) or []
+                rows, ignored_ct = _filter_ignored_rows(rows_raw)
                 if rows:
                     top_score = rows[0].get("score")
                     grp = [r for r in rows if r.get("score") == top_score]
-                    # clean display names for header/summary
                     names = [_strip_platform_tags(str(r.get("name","Unknown"))) for r in grp]
                     try:
                         sc_str = f"{int(top_score):,}"
@@ -3268,7 +3310,9 @@ class SubscriptionManager:
                         self._overtakes()[bkey] = count
                         await self._save()
 
-                        lb_rows = await fetch_battle_leaderboard(self.bot.http_session, bid, page_size=TOP_N) or []
+                        lb_rows_raw = await fetch_battle_leaderboard(self.bot.http_session, bid, page_size=TOP_N) or []
+                        lb_rows, _ = _filter_ignored_rows(lb_rows_raw)
+
                         user_ids = subs.get(bkey, [])
                         await self._send_alert(
                             battle,
@@ -3571,7 +3615,9 @@ class BattleListView(discord.ui.View):
         instr_key = INSTR_BY_ROLE_ID.get(role_id) if role_id is not None else None
         max_n = BAND_TOP_N if instr_key == "band" else TOP_N
 
-        desc_table = format_battle_rows(lb or [], max_n=max_n)
+        lb_raw = lb or []
+        lb, _ = _filter_ignored_rows(lb_raw)
+        desc_table = format_battle_rows(lb, max_n=max_n)
 
         parts = []
         if song:
@@ -3948,7 +3994,8 @@ async def leaderboards_cmd(interaction: discord.Interaction, song: str, instrume
         sid = int(q)
 
         assert bot.http_session is not None
-        rows = await fetch_leaderboards(bot.http_session, sid, role_id)
+        rows_raw = await fetch_leaderboards(session, song_id, role_id) or []
+        rows, ignored_ct = _filter_ignored_rows(rows_raw)
         if rows is None:
             await interaction.followup.send("No leaderboard data returned.")
             return
@@ -4042,7 +4089,8 @@ async def leaderboards_cmd(interaction: discord.Interaction, song: str, instrume
                 return
 
             role_id_inner = INSTR_ROLE_IDS[resolved_instr]
-            rows = await fetch_leaderboards(bot.http_session, song_obj.song_id, role_id_inner)
+            rows_raw = await fetch_leaderboards(session, song_id, role_id) or []
+            rows, ignored_ct = _filter_ignored_rows(rows_raw)
             if rows is None:
                 await inter.followup.send("No leaderboard data returned.")
                 return
@@ -4089,7 +4137,8 @@ async def leaderboards_cmd(interaction: discord.Interaction, song: str, instrume
         s = candidates[0]
 
     assert bot.http_session is not None
-    rows = await fetch_leaderboards(bot.http_session, s.song_id, role_id)
+    rows_raw = await fetch_leaderboards(session, song_id, role_id) or []
+    rows, ignored_ct = _filter_ignored_rows(rows_raw)
     if rows is None:
         await interaction.followup.send("No leaderboard data returned.")
         return
