@@ -3975,6 +3975,10 @@ class SongSelect(discord.ui.Select):
 @app_commands.describe(song="Song name (use quotes for exact match)", instrument="Instrument (guitar, bass, drums, vocals, keys)")
 async def leaderboards_cmd(interaction: discord.Interaction, song: str, instrument: str = "guitar"):
     await interaction.response.defer(thinking=True)
+    session = getattr(interaction.client, "http_session", None)
+    if not session:
+        await interaction.response.send_message("HTTP session not ready. Try again in a moment.", ephemeral=True)
+        return
 
     if not bot.song_index:
         await interaction.followup.send("Song map not loaded.")
