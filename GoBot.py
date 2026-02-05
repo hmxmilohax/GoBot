@@ -510,6 +510,7 @@ INSTR_ALIASES: Dict[str, str] = {
     "real guitar": "proguitar",
     "pro guitar": "proguitar",
     "proguitar": "proguitar",
+    "real_guitar": "proguitar",
 
     # Plastic Bass
     "b": "bass",
@@ -520,6 +521,7 @@ INSTR_ALIASES: Dict[str, str] = {
     "probass": "probass",
     "pro bass": "probass",
     "real bass": "probass",
+    "real_bass": "probass",
 
     # Plastic Drums
     "drum": "drums",
@@ -531,6 +533,8 @@ INSTR_ALIASES: Dict[str, str] = {
     "real drum": "prodrums",
     "real drums": "prodrums",
     "pro drums": "prodrums",
+    "real_drums": "prodrums",
+    "real_drum": "prodrums",
 
     # Vocals
     "v": "vocals",
@@ -558,6 +562,7 @@ INSTR_ALIASES: Dict[str, str] = {
     "realkeys": "prokeys",
     "real keys": "prokeys",
     "pro keys": "prokeys",
+    "real_keys": "prokeys",
 
     # Band
     "bandscore": "band",
@@ -669,6 +674,16 @@ def _as_dt(v) -> Optional[datetime]:
         return None
     return None
 
+def normalize_instr_key(v) -> Optional[str]:
+    if isinstance(v, int):
+        return INSTR_BY_ROLE_ID.get(v)
+    if isinstance(v, str):
+        s = v.strip()
+        if s.isdigit():
+            return INSTR_BY_ROLE_ID.get(int(s))
+        # NEW: run through resolve_instrument so aliases normalize too
+        return resolve_instrument(s)
+    return None
 
 def _parse_week_from_title(title: Optional[str]) -> Optional[int]:
     if not title:
@@ -3178,7 +3193,8 @@ class SubscriptionManager:
                 )
 
         # difficulty from the song's ranks for this instrument
-        rank_val = (song.ranks or {}).get(instr_key) if (song and instr_key) else None
+        instr_key = normalize_instr_key(battle.get("instrument"))  # int -> "proguitar"
+        rank_val  = _rank_for_song_instr(song, instr_key)
         diff_txt = difficulty_label(_threshold_key_for_instr(instr_key or ""), rank_val) if instr_key else "—"
 
         if song:
