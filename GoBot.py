@@ -715,6 +715,8 @@ class Song:
     ranks: Dict[str, int] = field(default_factory=dict)
     sub_genre: Optional[str] = None
     length_ms: Optional[int] = None
+    pack_link: Optional[str] = None
+    pack_ident: Optional[str] = None
 
 class SongIndex:
     def __init__(self, songs: List[Song]):
@@ -983,6 +985,8 @@ def _parse_block(block: str) -> Optional[Song]:
     length = rx(r'\(song_length\s+(\d+)\)')     
     source = rx(r'\(game_origin\s+([a-zA-Z0-9_]+)\)') or rx(r'\(game_origin\s+"([^"]+)"\)')
     author = rx(r'\(author\s+"([^"]+)"\)')
+    pack_link  = rx(r'\(pack_link\s+"([^"]+)"\)')
+    pack_ident = rx(r'\(pack_ident\s+"([^"]+)"\)')
 
     ranks: Dict[str, int] = {}
     m_rank = re.search(r'\(rank\s*(\([^()]+\)\s*)+\)', block, re.DOTALL)
@@ -1007,6 +1011,8 @@ def _parse_block(block: str) -> Optional[Song]:
             ranks=ranks,
             sub_genre=subg,
             length_ms=(int(length) if length else None),
+            pack_link=pack_link,
+            pack_ident=pack_ident,
         )
     return None
     
@@ -1131,6 +1137,18 @@ def resolve_instrument(instr_raw: str) -> Optional[str]:
     if best:
         return INSTR_ALIASES.get(best, best)
     return None
+
+def pack_display(song: Song) -> Optional[str]:
+    name = (getattr(song, "pack_ident", None) or "").strip()
+    link = (getattr(song, "pack_link", None) or "").strip()
+    if name and link:
+        return f"[{name}]({link})"
+    if name:
+        return name
+    if link:
+        return link
+    return None
+
 
 async def fetch_battle_top_winner(session: aiohttp.ClientSession, battle_id: int) -> Optional[dict]:
     # Fetch enough rows so we can skip ignored players and still find a legit winner.
@@ -1926,8 +1944,8 @@ class WeeklyBattleManager:
         for s in self.bot.song_index.songs:
             if s.song_id is None:
                 continue
-            if s.song_id > 5_110_000:
-                continue
+            #if s.song_id > 5_110_000:
+            #    continue
             if "(2x bass pedal)" in s.name.lower():
                 continue
             src = (s.source or "").lower()
@@ -2094,9 +2112,12 @@ class WeeklyBattleManager:
                 thumb = await fetch_song_art_url(self.bot.http_session, song.slug)
                 rank_val = _rank_for_song_instr(song, instr_key)
                 diff_txt = difficulty_label(_threshold_key_for_instr(instr_key), rank_val)
+                pack_txt = pack_display(song)
+                pack_part = f" • **Pack:** {pack_txt}" if pack_txt else ""
+
                 summary_lines.append(
                     f"{emoji} **{INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())}** — "
-                    f"**{song.name}** *by {song.artist}* • *{diff_txt}*"
+                    f"**{song.name}** *by {song.artist}* • *{diff_txt}*{pack_part}"
                 )
             else:
                 summary_lines.append(f"{emoji} **{INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())}** — *Unknown song* (ID {r.get('song_id')})")
@@ -2157,6 +2178,9 @@ class WeeklyBattleManager:
                 # Row 3: Details (full width)
                 details = f"{pretty_genre(song.genre)} • {pretty_source(song.source)} • ID `{song.song_id}`"
                 e.add_field(name="Details", value=details, inline=False)
+                pack_txt = pack_display(song)
+                if pack_txt:
+                    e.add_field(name="Pack", value=pack_txt, inline=False)
             else:
                 e.add_field(name="Details", value=f"ID `{r.get('song_id')}`", inline=False)
 
