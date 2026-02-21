@@ -16,6 +16,7 @@ from discord.ext import commands
 from discord.errors import Forbidden
 from datetime import datetime, timedelta, timezone
 import math
+from urllib.parse import urlparse
 from collections import defaultdict, Counter
 from zoneinfo import ZoneInfo
 
@@ -1138,17 +1139,39 @@ def resolve_instrument(instr_raw: str) -> Optional[str]:
         return INSTR_ALIASES.get(best, best)
     return None
 
-def pack_display(song: Song) -> Optional[str]:
+def _is_discord_message_link(url: str) -> bool:
+    try:
+        p = urlparse(url)
+    except Exception:
+        return False
+    host = (p.netloc or "").lower()
+    if host not in {"discord.com", "www.discord.com", "discordapp.com", "www.discordapp.com"}:
+        return False
+    path = (p.path or "").strip("/")
+    # channels/<guild>/<channel>/<message>
+    parts = path.split("/")
+    return len(parts) >= 4 and parts[0] == "channels"
+
+def pack_display(song: "Song") -> Optional[str]:
     name = (getattr(song, "pack_ident", None) or "").strip()
     link = (getattr(song, "pack_link", None) or "").strip()
-    if name and link:
-        return f"[{name}]({link})"
-    if name:
-        return name
-    if link:
-        return link
-    return None
 
+    if not name and not link:
+        return None
+    if name and not link:
+        return name
+    if link and not name:
+        # If it's a discord message link, force clickable in embeds
+        return f"<{link}>" if _is_discord_message_link(link) else link
+
+    # name + link
+    if _is_discord_message_link(link):
+        # Embeds often won't honor [text](url) for discord message links,
+        # but they WILL auto-link <url>
+        return f"**{name}**\n<{link}>"
+
+    # For normal links, markdown is usually fine
+    return f"[{name}]({link})"
 
 async def fetch_battle_top_winner(session: aiohttp.ClientSession, battle_id: int) -> Optional[dict]:
     # Fetch enough rows so we can skip ignored players and still find a legit winner.
