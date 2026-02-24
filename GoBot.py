@@ -1158,19 +1158,20 @@ def pack_display(song: "Song") -> Optional[str]:
 
     if not name and not link:
         return None
+
+    is_msg = _is_discord_message_link(link)
+
+    if link and not name:
+        return link  # raw url always
+
     if name and not link:
         return name
-    if link and not name:
-        # If it's a discord message link, force clickable in embeds
-        return f"<{link}>" if _is_discord_message_link(link) else link
 
     # name + link
-    if _is_discord_message_link(link):
-        # Embeds often won't honor [text](url) for discord message links,
-        # but they WILL auto-link <url>
-        return f"**{name}**\n<{link}>"
+    if is_msg:
+        # raw url on its own line is most reliable
+        return f"**{name}**\n{link}"
 
-    # For normal links, markdown is usually fine
     return f"[{name}]({link})"
 
 async def fetch_battle_top_winner(session: aiohttp.ClientSession, battle_id: int) -> Optional[dict]:
@@ -2136,7 +2137,13 @@ class WeeklyBattleManager:
                 rank_val = _rank_for_song_instr(song, instr_key)
                 diff_txt = difficulty_label(_threshold_key_for_instr(instr_key), rank_val)
                 pack_txt = pack_display(song)
-                pack_part = f" • **Pack:** {pack_txt}" if pack_txt else ""
+                if pack_txt:
+                    if _is_discord_message_link(getattr(song, "pack_link", "") or ""):
+                        pack_part = f"\nPack:\n{pack_txt}"   # no markdown needed; raw url will link
+                    else:
+                        pack_part = f" • **Pack:** {pack_txt}"
+                else:
+                    pack_part = ""
 
                 summary_lines.append(
                     f"{emoji} **{INSTR_DISPLAY_NAMES.get(instr_key, instr_key.capitalize())}** — "
@@ -2175,9 +2182,11 @@ class WeeklyBattleManager:
             e = discord.Embed(title=title_txt, color=color)
             e.description = f"# {song.name}" if song else f"**Unknown Song** (ID {r.get('song_id')})"
 
-
             if song:
-                # pieces
+                pack_link = (getattr(song, "pack_link", "") or "").strip()
+                if _is_discord_message_link(pack_link):
+                    e.url = pack_link  # <-- makes the embed title clickable
+
                 thumb = await fetch_song_art_url(self.bot.http_session, song.slug)
                 e.set_thumbnail(url=thumb)
                 artist = song.artist or "—"
@@ -2203,7 +2212,11 @@ class WeeklyBattleManager:
                 e.add_field(name="Details", value=details, inline=False)
                 pack_txt = pack_display(song)
                 if pack_txt:
-                    e.add_field(name="Pack", value=pack_txt, inline=False)
+                    # If discord message link, ensure raw URL is on its own line
+                    if _is_discord_message_link(getattr(song, "pack_link", "") or ""):
+                        e.add_field(name="Pack", value=pack_txt, inline=False)  # pack_txt already includes \n + raw url if needed
+                    else:
+                        e.add_field(name="Pack", value=pack_txt, inline=False)
             else:
                 e.add_field(name="Details", value=f"ID `{r.get('song_id')}`", inline=False)
 
