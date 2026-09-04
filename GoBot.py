@@ -1476,7 +1476,18 @@ class WeeklyBattleManager:
                 # process expirations
                 for rec in to_update:
                     uid = int(rec.get("user_id"))
-                    ok = await self._remove_champion_role_now(uid)
+                    async with self.lock:
+                        other_active = any(
+                            r is not rec
+                            and r.get("active")
+                            and int(r.get("user_id", 0)) == uid
+                            and (_from_iso(r.get("expires_at")) or now) > now
+                            for r in self.state.get(CHAMPION_GRANTS_KEY, [])
+                        )
+                    if other_active:
+                        ok = True
+                    else:
+                        ok = await self._remove_champion_role_now(uid)
                     async with self.lock:
                         # mark inactive whether or not removal succeeded (it will retry next boot if still on member)
                         rec["active"] = False
@@ -3148,7 +3159,7 @@ class SubscriptionManager:
             except (TypeError, ValueError):
                 return None
         # non-band: compare by name like before
-        return f"NAME::{str(top_row.get('name', 'Unknown')).strip()}"
+        return f"NAME::{_strip_platform_tags(str(top_row.get('name', 'Unknown')))}"
 
     def _baseline_or_changed(self, bkey: str, top_row: Optional[dict], battle: Optional[dict] = None) -> Optional[bool]:
         """None -> set baseline; True -> changed; False -> unchanged."""
@@ -3173,9 +3184,9 @@ class SubscriptionManager:
                 if "score" in cur and isinstance(cur["score"], int):
                     old_key = f"SCORE::{cur['score']}"
                 else:
-                    old_key = f"NAME::{cur.get('name','Unknown')}"
+                    old_key = f"NAME::{_strip_platform_tags(cur.get('name','Unknown'))}"
             else:
-                old_key = f"NAME::{cur.get('name','Unknown')}"
+                old_key = f"NAME::{_strip_platform_tags(cur.get('name','Unknown'))}"
 
         return new_key != old_key
 
